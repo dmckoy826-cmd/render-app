@@ -37,6 +37,7 @@ def model_out(m: ModelDoc) -> dict:
         "layer_count": len(s.get("layers", [])),
         "block_count": len(s.get("blocks", [])),
         "part_count": len(s.get("parts", [])),
+        "analyzer": s.get("analyzer", ""),
         "created_at": m.created_at.isoformat() if m.created_at else None,
     }
 

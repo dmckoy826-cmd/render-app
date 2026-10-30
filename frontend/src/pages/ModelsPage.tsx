@@ -5,6 +5,18 @@ import { usePoll } from "../hooks";
 import { StatusChip } from "../components/JobProgress";
 import type { ModelSummary } from "../types";
 
+export function SourceBadge({ analyzer, className = "" }: { analyzer: string; className?: string }) {
+  const a = analyzer || "";
+  const true_ = a.startsWith("dxf") || a.startsWith("rhino");
+  return (
+    <span className={`rounded border px-1.5 py-0.5 text-[10px] ${true_
+      ? "border-emerald-600/40 bg-emerald-950/85 text-emerald-300"
+      : "border-amber-600/40 bg-amber-950/85 text-amber-300"} ${className}`}>
+      {a.startsWith("dxf") ? "DXF · true geometry" : a.startsWith("rhino") ? "RHINO · true geometry" : "SIM · placeholder structure"}
+    </span>
+  );
+}
+
 export default function ModelsPage() {
   const nav = useNavigate();
   const fileRef = useRef<HTMLInputElement>(null);
@@ -55,10 +67,11 @@ export default function ModelsPage() {
         {(data || []).map((m) => (
           <button key={m.id} onClick={() => nav(`/models/${m.id}`)}
             className="group overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900/50 text-left transition-colors hover:border-amber-500/50">
-            <div className="flex h-44 items-center justify-center overflow-hidden bg-zinc-950">
+            <div className="relative flex h-44 items-center justify-center overflow-hidden bg-zinc-950">
               {m.preview_url
                 ? <img src={m.preview_url} alt={m.name} className="h-full w-full object-contain transition-transform group-hover:scale-[1.03]" />
                 : <svg viewBox="0 0 24 24" className="h-10 w-10 text-zinc-700" fill="currentColor"><path d="M12 2 3 7v10l9 5 9-5V7l-9-5Z" /></svg>}
+              <SourceBadge analyzer={m.analyzer} className="absolute left-2 top-2" />
             </div>
             <div className="border-t border-zinc-800 p-4">
               <div className="flex items-center justify-between gap-2">

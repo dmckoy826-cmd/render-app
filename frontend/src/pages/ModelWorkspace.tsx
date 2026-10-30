@@ -85,6 +85,12 @@ export default function ModelWorkspace() {
           </p>
         </div>
         <div className="ml-auto flex items-center gap-2">
+          <button onClick={async () => { await api.post(`/api/models/${modelId}/reanalyze`); refresh(); }}
+            disabled={model.status === "uploaded" || model.status === "analyzing"}
+            className="rounded-lg border border-zinc-700 px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-800 disabled:opacity-40"
+            title="Re-run analysis (e.g. after connecting the Rhino worker)">
+            Re-analyze
+          </button>
           <button onClick={() => setAutoOpen(true)} disabled={model.status !== "ready"}
             className="rounded-lg border border-zinc-700 px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-800 disabled:opacity-40">
             Auto-match
@@ -104,6 +110,28 @@ export default function ModelWorkspace() {
           </button>
         </div>
       </header>
+
+      {/* structure-source banner */}
+      {model.structure && (() => {
+        const a = model.structure!.analyzer || "";
+        const simulated = !a.startsWith("dxf") && !a.startsWith("rhino");
+        return (
+          <div className={`mx-6 mt-4 rounded-lg border px-4 py-3 text-xs leading-relaxed ${simulated
+            ? "border-amber-700/50 bg-amber-950/20 text-amber-200"
+            : "border-emerald-700/50 bg-emerald-950/20 text-emerald-200"}`}>
+            {simulated
+              ? <>
+                  <span className="font-semibold">Simulated structure.</span>{" "}
+                  The built-in engine cannot read binary DWG internals, so the layers, blocks and parts
+                  below are placeholders synthesized from the file name — not your drawing's geometry.
+                  For true geometry: <span className="font-medium">export DXF from AutoCAD and re-upload</span> (parsed
+                  for real, including layers, block definitions and bounding boxes), or connect the Rhino worker
+                  on your licensed machine (<code className="text-amber-300">worker/README.md</code>).
+                </>
+              : <>True geometry parsed by <code>{a}</code> — layers, block definitions and part bounds come from your file.</>}
+          </div>
+        );
+      })()}
 
       {/* body */}
       {model.status !== "ready" ? (

@@ -25,12 +25,36 @@ from .models import Assignment, Finish, Job, ModelDoc, Render
 
 ANALYZE_STAGES = [
     ("Reading file header", 8),
-    ("Importing geometry (Rhino 8)", 26),
-    ("Extracting layers", 46),
+    ("Importing geometry (simulated — binary DWG needs the Rhino worker)", 26),
+    ("Synthesizing placeholder structure from file name", 46),
     ("Scanning block definitions (BlockEdit)", 64),
     ("Measuring extents & units", 80),
     ("Building structure preview", 94),
 ]
+ANALYZE_STAGES_DXF = [
+    ("Reading DXF header", 8),
+    ("Parsing entities & true geometry", 30),
+    ("Extracting layers", 50),
+    ("Scanning block definitions (INSERTs)", 68),
+    ("Measuring extents & units", 84),
+    ("Building structure preview", 94),
+]
+
+
+def try_real_parse(model: ModelDoc):
+    """Parse uploads that are not binary DWG (DXF, or DXF misnamed as .dwg)."""
+    from . import dxfparse
+    path = config.MEDIA_DIR / model.storage_path
+    try:
+        head = path.read_bytes()[:6]
+    except OSError:
+        return None
+    if head.startswith(b"AC10"):  # binary DWG magic -> Rhino worker territory
+        return None
+    try:
+        return dxfparse.parse(str(path))
+    except Exception:
+        return None
 RENDER_STAGES = [
     ("Launching Rhino 8 (headless)", 7),
     ("Opening model geometry", 18),
@@ -125,10 +149,14 @@ def _mock_analyze(db: Session, job: Job) -> None:
         raise RuntimeError("model missing")
     model.status = "analyzing"
     db.commit()
+    structure = try_real_parse(model)
+    stages = ANALYZE_STAGES_DXF if structure else ANALYZE_STAGES
     per = 0.55
-    for stage, prog in ANALYZE_STAGES:
+    for stage, prog in stages:
         _stage_sleep(db, job, stage, prog, per)
-    apply_analysis(db, model, mockdata.build_structure(model.name))
+    if structure is None:
+        structure = mockdata.build_structure(model.name)
+    apply_analysis(db, model, structure)
 
 
 def apply_analysis(db: Session, model: ModelDoc, structure: dict) -> None:

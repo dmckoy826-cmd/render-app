@@ -30,7 +30,11 @@ whole workflow is usable and testable anywhere.
 
 - **Models** — upload `.dwg .dxf .3dm .skp .obj .step …`; an analyze job extracts layers,
   block definitions (with instance counts) and parts with bounding boxes; isometric
-  structure preview generated server-side.
+  structure preview generated server-side. **DXF files are parsed for real** (ezdxf:
+  true layers, colors, block instances, `$INSUNITS`, bounding boxes) even in simulated
+  mode — including DXF content misnamed as `.dwg` (the file header is sniffed).
+  Binary DWG cannot be read without Rhino, so it gets a simulated structure clearly
+  labeled `SIM` in the UI until the Rhino worker is connected.
 - **Finish library** — PNG/JPG swatches with category (laminate / PET / product finish),
   **real-world swatch size in inches** (drives texture scale everywhere), tags, seamless flag.
 - **Mapping** — three levels: per **layer**, per **block definition** (applied via BlockEdit
@@ -87,6 +91,7 @@ backend/app/          FastAPI app: models, finishes, presets, jobs, renders, age
 backend/app/imaging.py   isometric scene renderer (occlusion-ordered painter, real
                          texture scale) used for previews + simulated renders
 backend/app/mockdata.py  structure-contract generator standing in for Rhino analysis
+backend/app/dxfparse.py  real DXF parser (ezdxf) → same structure contract
 backend/seed.py       demo data
 worker/               Rhino 8 worker agent + RhinoPython scripts (analyze, render)
 frontend/             React + Vite + Tailwind + three.js UI
@@ -105,5 +110,7 @@ frontend/             React + Vite + Tailwind + three.js UI
 }
 ```
 
-Both the simulator and the Rhino worker produce this document, so the UI never changes
-when you switch engines.
+The simulator, the DXF parser and the Rhino worker all produce this document, so the UI
+never changes when you switch engines. Each structure carries an `analyzer` string
+(`mock-engine …`, `dxf-parser …`, `rhino8-worker …`) that the UI shows as a
+SIM / DXF / RHINO badge so you always know whether the geometry is real.

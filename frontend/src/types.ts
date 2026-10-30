@@ -62,6 +62,7 @@ export interface ModelSummary {
   layer_count: number;
   block_count: number;
   part_count: number;
+  analyzer: string;
   created_at: string | null;
 }
 

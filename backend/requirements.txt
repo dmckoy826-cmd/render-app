@@ -3,3 +3,4 @@ uvicorn[standard]>=0.30
 sqlalchemy>=2.0
 pillow>=10.3
 python-multipart>=0.0.9
+ezdxf>=1.3
