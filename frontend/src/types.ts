@@ -140,8 +140,11 @@ export interface Preset {
 
 export interface SystemInfo {
   runner: string;
+  mode: string;
   engine_label: string;
   agent_connected: boolean;
+  agent_name: string;
+  agent_last_seen_s: number | null;
   version: string;
   target: string;
 }

@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
-from . import automatch, config, imaging, mockdata
+from . import agentstate, automatch, config, imaging, mockdata
 from .config import PREVIEW_DIR, RENDER_DIR
 from .db import SessionLocal
 from .models import Assignment, Finish, Job, ModelDoc, Render
@@ -79,13 +79,24 @@ def utcnow():
 # Enqueue / lifecycle
 # --------------------------------------------------------------------------- #
 
+def pick_runner() -> str:
+    """Which engine handles the next job: the Rhino agent or the built-in simulator."""
+    if config.RUNNER == "agent":
+        return "agent"
+    if config.RUNNER == "auto":
+        return "agent" if agentstate.connected() else "mock"
+    return "mock"
+
+
 def create_job(db: Session, kind: str, model_id: int, settings: dict | None = None) -> Job:
-    job = Job(kind=kind, model_id=model_id, status="queued", runner=config.RUNNER,
-              settings=settings or {}, stage="Queued")
+    which = pick_runner()
+    job = Job(kind=kind, model_id=model_id, status="queued", runner=which,
+              settings=settings or {},
+              stage="Queued" if which == "mock" else "Waiting for Rhino worker")
     db.add(job)
     db.commit()
     db.refresh(job)
-    if config.RUNNER == "mock":
+    if which == "mock":
         threading.Thread(target=_run_mock_job, args=(job.id,), daemon=True).start()
     return job
 
@@ -159,12 +170,20 @@ def _mock_analyze(db: Session, job: Job) -> None:
     apply_analysis(db, model, structure)
 
 
-def apply_analysis(db: Session, model: ModelDoc, structure: dict) -> None:
-    """Store analyzed structure + preview image (shared by mock runner and agent)."""
+def apply_analysis(db: Session, model: ModelDoc, structure: dict,
+                   preview_rel: str | None = None) -> None:
+    """Store analyzed structure + preview image (shared by mock runner and agent).
+
+    preview_rel: the agent may post a real viewport capture — use it instead of
+    regenerating a preview from the structure.
+    """
     model.structure = structure
     model.units = structure.get("units", "inches")
-    prev_rel = f"previews/{model.id}_{uuid.uuid4().hex[:8]}.png"
-    imaging.structure_preview(structure, str(PREVIEW_DIR.parent / prev_rel))
+    if preview_rel is None:
+        prev_rel = f"previews/{model.id}_{uuid.uuid4().hex[:8]}.png"
+        imaging.structure_preview(structure, str(PREVIEW_DIR.parent / prev_rel))
+    else:
+        prev_rel = preview_rel
     model.preview_path = prev_rel
     model.status = "ready"
     db.commit()

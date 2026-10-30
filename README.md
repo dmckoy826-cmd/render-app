@@ -5,10 +5,11 @@ anything AutoCAD/Rhino exports), upload PNG/JPG swatches of laminates, PET felts
 product finishes, map them onto the right parts of the model — by auto-match, by hand,
 or with reusable presets — and queue renders that come back into a gallery.
 
-The render back end is your **existing Rhino 8 + V-Ray licenses**, driven headlessly by a
-worker agent on your Windows machine (`worker/`). Until the worker is connected, the
-server runs a **built-in simulation engine** with the exact same job lifecycle, so the
-whole workflow is usable and testable anywhere.
+The render back end is your **existing Rhino 8 + V-Ray licenses**, driven by a worker
+agent on your Windows machine (`worker/`). The server runs in **auto mode**: while the
+worker is connected (its polls are heartbeats — the sidebar shows a live green chip),
+jobs run on your machine through real Rhino; with no worker connected, a **built-in
+simulation engine** with the exact same job lifecycle keeps everything usable.
 
 ```
                         ┌───────────────────────────────┐
@@ -16,12 +17,12 @@ whole workflow is usable and testable anywhere.
                         │  /api  jobs·models·finishes   │
                         │  /media  uploads·renders      │
                         └───────┬───────────────┬───────┘
-                     RENDER_RUNNER=mock   RENDER_RUNNER=agent
-                        │  simulated          │  polls /api/agent/*
-                        │  Rhino/V-Ray        ▼
+                  worker offline (fallback)   worker connected (heartbeat)
+                        │  simulated             │  polls /api/agent/*
+                        │  Rhino/V-Ray           ▼
                         │               worker/agent.py (Windows)
-                        │                 └─ Rhino 8 headless
-                        ▼                    └─ V-Ray render (+ BlockEdit)
+                        │                 └─ Rhino 8 + V-Ray
+                        ▼                    (analyze, render, BlockEdit)
                    Pillow isometric
                    scene renderer
 ```
@@ -31,8 +32,9 @@ whole workflow is usable and testable anywhere.
 - **Models** — upload `.dwg .dxf .3dm .skp .obj .step …`; an analyze job extracts layers,
   block definitions (with instance counts) and parts with bounding boxes; isometric
   structure preview generated server-side. **DXF files are parsed for real** (ezdxf:
-  true layers, colors, block instances, `$INSUNITS`, bounding boxes) even in simulated
-  mode — including DXF content misnamed as `.dwg` (the file header is sniffed).
+  true layers, colors, block instances expanded into per-inner-layer parts — the
+  BlockEdit targets — `$INSUNITS`, bounding boxes) even in simulated mode, including
+  DXF content misnamed as `.dwg` (the file header is sniffed).
   Binary DWG cannot be read without Rhino, so it gets a simulated structure clearly
   labeled `SIM` in the UI until the Rhino worker is connected.
 - **Finish library** — PNG/JPG swatches with category (laminate / PET / product finish),
@@ -72,17 +74,24 @@ cabinet, nine procedural swatches, a preset and a finished render.
 
 ## Connecting your real Rhino + V-Ray machine
 
-See [`worker/README.md`](worker/README.md). Short version:
+See [`worker/README.md`](worker/README.md). Short version — no server config needed
+(auto mode detects the worker by heartbeat):
 
-```bash
-RENDER_RUNNER=agent ../.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000   # server
-```
 ```bat
-rem Windows box with the licenses
+rem Windows box with the licenses — or edit + double-click worker\start_worker.bat
 set FF_API=http://<server-ip>:8000
 set FF_RHINO=C:\Program Files\Rhino 8\System\Rhino.exe
 python worker\agent.py
 ```
+
+The sidebar flips to a pulsing green **Rhino worker connected** chip; from then on
+analyze + render jobs run on your machine. Failed jobs report the exact Rhino console
+output on the Jobs page. `RENDER_RUNNER=agent` (worker-only, no fallback) and
+`RENDER_RUNNER=mock` (never use the worker) remain available.
+
+Dev tools to test the pipeline without Rhino: `worker/dev_fake_worker.py` (speaks the
+agent protocol with generated results) and `worker/stub_rhino.py` (stands in for
+Rhino.exe so agent.py's real transport can run on Linux/macOS).
 
 ## Layout
 
@@ -91,9 +100,12 @@ backend/app/          FastAPI app: models, finishes, presets, jobs, renders, age
 backend/app/imaging.py   isometric scene renderer (occlusion-ordered painter, real
                          texture scale) used for previews + simulated renders
 backend/app/mockdata.py  structure-contract generator standing in for Rhino analysis
-backend/app/dxfparse.py  real DXF parser (ezdxf) → same structure contract
+backend/app/dxfparse.py  real DXF parser (ezdxf) → same structure contract; expands
+                         block instances into per-inner-layer parts (BlockEdit targets)
+backend/app/agentstate.py worker heartbeat tracking (auto-mode routing, live status)
 backend/seed.py       demo data
 worker/               Rhino 8 worker agent + RhinoPython scripts (analyze, render)
+                      + start_worker.bat + no-Rhino dev tools (fake worker, stub Rhino)
 frontend/             React + Vite + Tailwind + three.js UI
 ```
 

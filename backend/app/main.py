@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from . import config
+from . import agentstate, config
 from .db import Base, engine
 from .routers import agent, finishes, jobs, models, presets, renders
 
@@ -40,11 +40,24 @@ app.include_router(agent.router)
 
 @app.get("/api/system/info")
 def system_info():
+    st = agentstate.snapshot()
+    mode = config.RUNNER
+    if mode == "agent":
+        runner_active = "agent"
+        label = "Rhino worker agent (V-Ray for Rhino)"
+    elif mode == "auto":
+        runner_active = "agent" if st["agent_connected"] else "mock"
+        label = ("Rhino worker connected — jobs run on your machine"
+                 if st["agent_connected"] else
+                 "Simulated engine — no Rhino worker connected (jobs queue for it in agent mode)")
+    else:
+        runner_active = "mock"
+        label = "Simulated engine (mock Rhino/V-Ray)"
     return {
-        "runner": config.RUNNER,
-        "engine_label": ("Simulated engine (mock Rhino/V-Ray)" if config.RUNNER == "mock"
-                         else "Rhino worker agent (V-Ray for Rhino)"),
-        "agent_connected": config.RUNNER == "agent",
+        "runner": runner_active,
+        "mode": mode,
+        "engine_label": label,
+        **st,
         "version": app.version,
         "target": "Rhino 8 + V-Ray 7 · LAN deployment",
     }

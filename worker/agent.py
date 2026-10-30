@@ -9,8 +9,10 @@ Setup (on the Rhino machine):
     set FF_RHINO=C:\Program Files\Rhino 8\System\Rhino.exe
     python agent.py
 
-The server must run with RENDER_RUNNER=agent so jobs queue for this worker instead of
-the built-in simulation.
+The server defaults to RENDER_RUNNER=auto: while this agent is polling (its heartbeat
+is tracked server-side), jobs route to it; if it goes away, the server falls back to
+the built-in simulation engine so the UI keeps working. Set RENDER_RUNNER=agent to
+force jobs to wait for a real worker only.
 """
 from __future__ import annotations
 
@@ -42,19 +44,28 @@ def download(url: str, dest: Path) -> None:
             fh.write(chunk)
 
 
-def run_rhino(script: Path, env: dict) -> None:
-    """Launch headless Rhino and execute a RhinoPython script.
+def run_rhino(script: Path, env: dict, timeout: float = 3600) -> str:
+    """Launch Rhino and execute a RhinoPython script; return its console output.
 
-    Rhino 8 accepts /runscript on the command line; the script path is quoted and
-    terminated with `_` so the command line returns. The script itself reads its job
-    parameters from the environment (FF_*).
+    Command line follows the McNeel-documented pattern for paths with spaces:
+    the script path is wrapped in PARENTHESES inside the runscript macro, and
+    `_Exit` closes Rhino when the script finishes (each script clears the
+    document's Modified flag so no save prompt can block the exit).
+    `/notemplate` skips the startup template/units dialog.
     """
     e = {**os.environ, **env}
-    cmd = [RHINO, "/nosplash", f'/runscript=-_RunPythonScript "{script}" _']
+    cmd = [RHINO, "/nosplash", "/notemplate",
+           f"/runscript=-_RunPythonScript ({script}) _Exit"]
     log("exec:", " ".join(cmd))
-    proc = subprocess.run(cmd, env=e, capture_output=True, text=True, timeout=3600)
+    try:
+        proc = subprocess.run(cmd, env=e, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"Rhino timed out after {timeout:.0f}s (job may be too large "
+                           f"or Rhino showed a modal dialog)") from exc
+    out = f"{proc.stdout or ''}\n{proc.stderr or ''}".strip()
     if proc.returncode != 0:
-        raise RuntimeError(f"Rhino exited {proc.returncode}: {proc.stdout[-2000:]} {proc.stderr[-2000:]}")
+        raise RuntimeError(f"Rhino exited {proc.returncode}: {out[-2000:]}")
+    return out
 
 
 def progress(job_id: int, pct: int, stage: str) -> None:
@@ -73,18 +84,28 @@ def do_analyze(job: dict, model: dict) -> None:
         out_json = td / "structure.json"
         out_png = td / "preview.png"
         progress(job["id"], 10, "Importing in Rhino 8")
-        run_rhino(HERE / "rhino_scripts" / "analyze_model.py", {
+        console = run_rhino(HERE / "rhino_scripts" / "analyze_model.py", {
             "FF_MODEL": str(model_path),
             "FF_OUT_JSON": str(out_json),
             "FF_OUT_PNG": str(out_png),
         })
+        if not out_json.exists():
+            raise RuntimeError(f"Rhino produced no structure.json. Console output: {console[-1500:]}")
         structure = json.loads(out_json.read_text())
         progress(job["id"], 90, "Uploading structure")
-        with open(out_png, "rb") as fh:
+        files = None
+        fh = None
+        if out_png.exists():
+            fh = open(out_png, "rb")
+            files = {"files": ("preview.png", fh, "image/png")}
+        try:
             r = requests.post(f"{API}/api/agent/jobs/{job['id']}/complete",
                               data={"structure": json.dumps(structure)},
-                              files={"files": ("preview.png", fh, "image/png")}, timeout=120)
-        r.raise_for_status()
+                              files=files, timeout=120)
+            r.raise_for_status()
+        finally:
+            if fh:
+                fh.close()
 
 
 def do_render(job: dict, model: dict, settings: dict, assignments: list) -> None:
@@ -98,7 +119,7 @@ def do_render(job: dict, model: dict, settings: dict, assignments: list) -> None
         out_dir = td / "out"
         out_dir.mkdir()
         progress(job["id"], 5, "Rhino 8: applying V-Ray materials")
-        run_rhino(HERE / "rhino_scripts" / "render_model.py", {
+        console = run_rhino(HERE / "rhino_scripts" / "render_model.py", {
             "FF_MODEL": str(model_path),
             "FF_ASSIGNMENTS": str(assign_path),
             "FF_OUT_DIR": str(out_dir),
@@ -109,7 +130,7 @@ def do_render(job: dict, model: dict, settings: dict, assignments: list) -> None
         })
         imgs = sorted(out_dir.glob("*.png")) + sorted(out_dir.glob("*.jpg"))
         if not imgs:
-            raise RuntimeError("render script produced no images")
+            raise RuntimeError(f"render script produced no images. Console output: {console[-1500:]}")
         progress(job["id"], 92, "Uploading renders")
         files = [("files", (p.name, open(p, "rb"), "image/png")) for p in imgs]
         try:
@@ -122,10 +143,13 @@ def do_render(job: dict, model: dict, settings: dict, assignments: list) -> None
 
 
 def main() -> int:
-    log(f"polling {API} every {POLL}s (Rhino: {RHINO})")
+    import socket
+    who = socket.gethostname()
+    log(f"polling {API} every {POLL}s as '{who}' (Rhino: {RHINO})")
+    log("server runs in auto mode: while this agent polls, jobs route here; otherwise they simulate")
     while True:
         try:
-            r = requests.get(f"{API}/api/agent/jobs/next", timeout=30)
+            r = requests.get(f"{API}/api/agent/jobs/next", params={"name": who}, timeout=30)
             r.raise_for_status()
             payload = r.json()
         except requests.RequestException as exc:

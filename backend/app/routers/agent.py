@@ -18,7 +18,7 @@ import uuid
 from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
-from .. import runner
+from .. import agentstate, runner
 from ..config import MEDIA_DIR, PREVIEW_DIR, RENDER_DIR
 from ..db import get_db
 from ..models import Assignment, Finish, Job, ModelDoc, Render
@@ -71,7 +71,8 @@ def _payload(db: Session, job: Job) -> dict:
 
 
 @router.get("/jobs/next")
-def next_job(db: Session = Depends(get_db)):
+def next_job(name: str = "", db: Session = Depends(get_db)):
+    agentstate.ping(name)
     job = _claim_next(db)
     if not job:
         return {"job": None}
@@ -80,6 +81,7 @@ def next_job(db: Session = Depends(get_db)):
 
 @router.post("/jobs/{job_id}/progress")
 def progress(job_id: int, body: dict, db: Session = Depends(get_db)):
+    agentstate.ping()
     job = db.get(Job, job_id)
     if not job:
         raise HTTPException(404, "job not found")
@@ -101,6 +103,7 @@ async def complete(job_id: int,
     model = db.get(ModelDoc, job.model_id)
 
     saved: list[str] = []
+    analyze_preview: str | None = None
     for f in files:
         data = await f.read()
         if not data:
@@ -109,7 +112,7 @@ async def complete(job_id: int,
         if job.kind == "analyze":
             rel = f"previews/{stem}"
             (MEDIA_DIR / rel).write_bytes(data)
-            model.preview_path = rel
+            analyze_preview = rel  # real Rhino viewport capture — keep it
         else:
             rel = f"renders/{stem}"
             (MEDIA_DIR / rel).write_bytes(data)
@@ -122,7 +125,7 @@ async def complete(job_id: int,
             raise HTTPException(400, f"invalid structure JSON: {exc}")
         if not struct:
             raise HTTPException(400, "analyze jobs must return a structure JSON")
-        runner.apply_analysis(db, model, struct)
+        runner.apply_analysis(db, model, struct, preview_rel=analyze_preview)
     else:
         _, _, snapshot = runner.build_finish_lookup(db, model)
         settings = job.settings or {}
@@ -146,6 +149,7 @@ async def complete(job_id: int,
 
 @router.post("/jobs/{job_id}/fail")
 def fail(job_id: int, body: dict, db: Session = Depends(get_db)):
+    agentstate.ping()
     job = db.get(Job, job_id)
     if not job:
         raise HTTPException(404, "job not found")

@@ -28,6 +28,10 @@ UNIT_TO_IN = {
 }
 
 MAX_PARTS = 800  # viewer sanity cap
+MAX_VIRTUAL = 200_000  # guard against pathological block expansion
+# annotation/text entities are not finishable geometry — skip them everywhere
+SKIP_TYPES = {"ATTDEF", "ATTRIB", "TEXT", "MTEXT", "DIMENSION", "LEADER",
+              "MULTILEADER", "TOLERANCE", "WIPEOUT", "LIGHT", "CAMERA"}
 
 
 def _layer_hex(doc, name: str) -> str:
@@ -63,22 +67,64 @@ def parse(path: str) -> dict:
         })
         return pid
 
+    virtual_budget = MAX_VIRTUAL
+
+    def union(cur, b):
+        if cur is None:
+            return [b.extmin.x, b.extmin.y, b.extmin.z, b.extmax.x, b.extmax.y, b.extmax.z]
+        cur[0] = min(cur[0], b.extmin.x); cur[1] = min(cur[1], b.extmin.y)
+        cur[2] = min(cur[2], b.extmin.z); cur[3] = max(cur[3], b.extmax.x)
+        cur[4] = max(cur[4], b.extmax.y); cur[5] = max(cur[5], b.extmax.z)
+        return cur
+
     for e in msp:
         if len(parts) >= MAX_PARTS:
             break
         try:
             if e.dxftype() == "INSERT":
-                b = ezbbox.extents([e], cache=cache)
-                if not b.has_data:
-                    continue
                 defn = e.dxf.name
                 meta = blocks_meta.setdefault(defn, {"count": 0, "layers": set(), "part_ids": []})
                 meta["count"] += 1
-                meta["layers"].add(e.dxf.layer)
-                pid = add_part(f"{defn} #{meta['count']}", e.dxf.layer, defn, True,
-                               b.extmin, b.extmax)
-                meta["part_ids"].append(pid)
+                n = meta["count"]
+                # Expand the block definition (recursively — nested INSERTs too) into
+                # world-space copies and group them by their REAL inner layers. This is
+                # what makes drawings that are "4 inserts on layer 0" show their actual
+                # structure (e.g. AFUWK-3-WKLM work surfaces, AFUWK-3-EDLM edges...).
+                per_layer: dict[str, list] = {}
+                expanded = 0
+                try:
+                    for ve in e.virtual_entities():
+                        if virtual_budget <= 0 or expanded >= 5000:
+                            break
+                        virtual_budget -= 1
+                        expanded += 1
+                        if ve.dxftype() in SKIP_TYPES:
+                            continue
+                        b = ezbbox.extents([ve])
+                        if not b.has_data:
+                            continue
+                        per_layer[getattr(ve.dxf, "layer", "0")] = union(
+                            per_layer.get(getattr(ve.dxf, "layer", "0")), b)
+                except Exception:
+                    per_layer = {}
+                if per_layer:
+                    for lay, bb in per_layer.items():
+                        if len(parts) >= MAX_PARTS:
+                            break
+                        meta["layers"].add(lay)
+                        pid = add_part(f"{defn} #{n} · {lay}", lay, defn, True, bb[:3], bb[3:])
+                        meta["part_ids"].append(pid)
+                else:
+                    # fallback: whole-instance bbox when expansion yields nothing
+                    b = ezbbox.extents([e], cache=cache)
+                    if not b.has_data:
+                        continue
+                    meta["layers"].add(e.dxf.layer)
+                    pid = add_part(f"{defn} #{n}", e.dxf.layer, defn, True, b.extmin, b.extmax)
+                    meta["part_ids"].append(pid)
             else:
+                if e.dxftype() in SKIP_TYPES:
+                    continue
                 b = ezbbox.extents([e], cache=cache)
                 if not b.has_data:
                     continue
@@ -108,8 +154,18 @@ def parse(path: str) -> dict:
     layer_parts: dict[str, int] = {}
     for p in parts:
         layer_parts[p["layer"]] = layer_parts.get(p["layer"], 0) + 1
-    layers = [{"name": n, "color": _layer_hex(doc, n), "part_count": c}
-              for n, c in layer_parts.items()]
+    # include the file's real layer table (skip Defpoints) so the UI shows the
+    # drawing's actual layer structure with AutoCAD colors, even for layers whose
+    # geometry is annotation-only
+    names = list(layer_parts)
+    try:
+        for lay in doc.layers:
+            if lay.dxf.name != "Defpoints" and lay.dxf.name not in names:
+                names.append(lay.dxf.name)
+    except Exception:
+        pass
+    layers = [{"name": n, "color": _layer_hex(doc, n), "part_count": layer_parts.get(n, 0)}
+              for n in names]
     blocks = [{"name": n, "instance_count": v["count"], "layers": sorted(v["layers"]),
                "part_ids": v["part_ids"]} for n, v in blocks_meta.items()]
 
