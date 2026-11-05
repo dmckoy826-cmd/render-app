@@ -37,10 +37,13 @@ def main():
         json.dump(structure, fh, allow_nan=False)
     if OUT_PNG:
         try:
-            rs.Command("-_SetCurrentView _World _Perspective", False)
-            rs.ZoomExtents()
             view = sc.doc.Views.ActiveView
             if view is not None:
+                view.ActiveViewport.SetProjection(
+                    Rhino.Display.DefinedViewportProjection.Perspective, "Perspective", True
+                )
+                view.ActiveViewport.ZoomExtents()
+                view.Redraw()
                 bitmap = view.CaptureToBitmap(System.Drawing.Size(1200, 900))
                 if bitmap is not None:
                     bitmap.Save(OUT_PNG, System.Drawing.Imaging.ImageFormat.Png)

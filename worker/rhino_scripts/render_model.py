@@ -405,10 +405,21 @@ def main():
         raise RuntimeError("The geometry or block structure changed during material assignment; "
                            "the render was stopped to avoid a wrong result.")
 
-    view = {"front": "_Front", "top": "_Top"}.get(CAMERA, "_Perspective")
-    if rs.Command("-_SetCurrentView _World %s" % view, False) is False:
-        raise RuntimeError("Could not set the requested camera.")
-    rs.ZoomExtents()
+    proj_map = {
+        "front": (Rhino.Display.DefinedViewportProjection.Front, "Front"),
+        "top": (Rhino.Display.DefinedViewportProjection.Top, "Top"),
+    }
+    proj, view_name = proj_map.get(CAMERA, (Rhino.Display.DefinedViewportProjection.Perspective, "Perspective"))
+    active_view = sc.doc.Views.ActiveView
+    if active_view is None:
+        views = sc.doc.Views.GetViewList(True, False)
+        active_view = views[0] if views else None
+    if active_view is None:
+        raise RuntimeError("Could not find an active Rhino viewport for rendering.")
+    sc.doc.Views.ActiveView = active_view
+    active_view.ActiveViewport.SetProjection(proj, view_name, True)
+    active_view.ActiveViewport.ZoomExtents()
+    active_view.Redraw()
     settings = sc.doc.RenderSettings
     settings.UseViewportSize = False
     settings.ImageSize = System.Drawing.Size(WIDTH, HEIGHT)
