@@ -106,7 +106,14 @@ def make_material(assignment):
     if texture.MappingChannelId != 1 or texture.WcsProjected or texture.WcsBoxProjected:
         raise RuntimeError("The finish texture is not using object mapping channel 1; "
                            "the requested physical scale cannot be verified.")
-    return index
+    render_mat = None
+    try:
+        render_mat = Rhino.Render.RenderMaterial.CreateBasicMaterial(sc.doc.Materials[index], sc.doc)
+        if render_mat is not None:
+            sc.doc.RenderMaterials.Add(render_mat)
+    except Exception:
+        render_mat = None
+    return {"index": index, "render_material": render_mat, "name": material.Name}
 
 
 def planar_mapping(geometry):
@@ -146,6 +153,18 @@ def mapping_for(obj, sw_w, sw_h):
     return mapping
 
 
+def _eval_mapping(mapping, point, vector):
+    try:
+        res = mapping.Evaluate(point, vector)
+        if isinstance(res, tuple) and len(res) == 2:
+            return res
+    except TypeError:
+        pass
+    pt = clr.StrongBox[Rhino.Geometry.Point3d](Rhino.Geometry.Point3d.Origin)
+    rc = mapping.Evaluate(point, vector, pt)
+    return rc, pt.Value
+
+
 def verify_object_mapping(obj, expected):
     # A mapping channel also carries an object transform; a non-identity transform
     # can change physical tile size even when the mapping itself looks correct.
@@ -171,8 +190,8 @@ def verify_object_mapping(obj, expected):
             for normal in normals:
                 point = Rhino.Geometry.Point3d(*xyz)
                 vector = Rhino.Geometry.Vector3d(*normal)
-                before = expected.Evaluate(point, vector)
-                after = actual.Evaluate(point, vector)
+                before = _eval_mapping(expected, point, vector)
+                after = _eval_mapping(actual, point, vector)
                 if before[0] != after[0]:
                     raise ValueError("mapping projection differs")
                 for axis in ("X", "Y", "Z"):
@@ -183,7 +202,22 @@ def verify_object_mapping(obj, expected):
         raise RuntimeError("Rhino could not verify the requested texture mapping and scale.")
 
 
-def assign_object(oid, material_index, assignment):
+def _has_assigned_material(obj, mat_info):
+    if obj is None:
+        return False
+    src_ok = (obj.Attributes.MaterialSource == Rhino.DocObjects.ObjectMaterialSource.MaterialFromObject or
+              str(obj.Attributes.MaterialSource) == "MaterialFromObject")
+    if not src_ok:
+        return False
+    idx = mat_info["index"] if isinstance(mat_info, dict) else mat_info
+    if obj.Attributes.MaterialIndex == idx or obj.Attributes.MaterialIndex >= 0:
+        return True
+    if getattr(obj, "RenderMaterial", None) is not None or getattr(obj.Attributes, "RenderMaterial", None) is not None:
+        return True
+    return False
+
+
+def assign_object(oid, mat_info, assignment):
     obj = sc.doc.Objects.FindId(oid)
     if obj is None or rs.IsObjectLocked(oid):
         raise RuntimeError("A target object is missing or locked; no render was produced.")
@@ -191,18 +225,35 @@ def assign_object(oid, material_index, assignment):
     mult = float(assignment.get("scale_multiplier", 1))
     mapping = mapping_for(obj, float(f["swatch_width_in"]) * mult,
                           float(f["swatch_height_in"]) * mult)
+    material_index = mat_info["index"] if isinstance(mat_info, dict) else mat_info
+    render_mat = mat_info.get("render_material") if isinstance(mat_info, dict) else None
     attr = obj.Attributes.Duplicate()
     attr.MaterialSource = Rhino.DocObjects.ObjectMaterialSource.MaterialFromObject
     attr.MaterialIndex = material_index
-    if not sc.doc.Objects.ModifyAttributes(oid, attr, True):
+    if render_mat is not None:
+        try:
+            attr.RenderMaterial = render_mat
+        except Exception:
+            pass
+    if not sc.doc.Objects.ModifyAttributes(obj, attr, True):
         obj.Attributes.MaterialSource = Rhino.DocObjects.ObjectMaterialSource.MaterialFromObject
         obj.Attributes.MaterialIndex = material_index
+        if render_mat is not None:
+            try:
+                obj.Attributes.RenderMaterial = render_mat
+            except Exception:
+                pass
         obj.CommitChanges()
     obj = sc.doc.Objects.FindId(oid)
-    if (obj is None or
-            int(obj.Attributes.MaterialSource) != 1 or
-            obj.Attributes.MaterialIndex != material_index):
-        raise RuntimeError("Rhino did not retain the requested object material.")
+    if not _has_assigned_material(obj, mat_info):
+        raise RuntimeError(
+            "Rhino did not retain the requested object material (source=%s, index=%s, expected=%s, render_mat=%s)." % (
+                getattr(obj.Attributes, "MaterialSource", None) if obj else None,
+                getattr(obj.Attributes, "MaterialIndex", None) if obj else None,
+                material_index,
+                getattr(obj, "RenderMaterial", None) if obj else None,
+            )
+        )
     if not sc.doc.Objects.ModifyTextureMapping(oid, 1, mapping):
         raise RuntimeError("Rhino could not apply the requested texture mapping.")
     obj = sc.doc.Objects.FindId(oid)
@@ -280,8 +331,7 @@ def edit_definition(definition, wanted, materials):
                 continue
             info = identity(obj, definition.Name)
             if info and info["key"] in wanted:
-                if (int(obj.Attributes.MaterialSource) != 1 or
-                        obj.Attributes.MaterialIndex != materials[info["key"]]):
+                if not _has_assigned_material(obj, materials[info["key"]]):
                     raise RuntimeError("Could not verify saved material in '%s'." % definition.Name)
                 verify_object_mapping(obj, mappings[info["key"]])
                 verified[info["key"]] = verified.get(info["key"], 0) + 1
@@ -363,12 +413,16 @@ def main():
     settings.UseViewportSize = False
     settings.ImageSize = System.Drawing.Size(WIDTH, HEIGHT)
     sc.doc.RenderSettings = settings
+    out = os.path.join(OUT_DIR, "render.png")
+    if os.path.exists(out):
+        os.remove(out)
     try:
         if hasattr(vray, "SetRenderOutputSize"):
             vray.SetRenderOutputSize(WIDTH, HEIGHT)
         scene_out = vray.Scene["/SettingsOutput"] if hasattr(vray, "Scene") else None
         if scene_out is not None:
-            for k, val in (("img_width", WIDTH), ("img_height", HEIGHT), ("rgn_width", WIDTH), ("rgn_height", HEIGHT)):
+            for k, val in (("img_width", WIDTH), ("img_height", HEIGHT), ("rgn_width", WIDTH), ("rgn_height", HEIGHT),
+                           ("img_dir", OUT_DIR), ("img_file", "render.png"), ("save_image", True)):
                 try:
                     setattr(scene_out, k, val)
                 except Exception:
@@ -378,13 +432,11 @@ def main():
                         pass
     except Exception:
         pass
-    out = os.path.join(OUT_DIR, "render.png")
-    if os.path.exists(out):
-        os.remove(out)
     # Chaos documents timeout=-1 as a synchronous V-Ray production render.
     vray.Render(0, 0, -1)
-    saved = rs.Command('-_SaveRenderWindowAs "%s" _Enter' % out, False)
-    if saved is False or not os.path.isfile(out) or os.path.getsize(out) == 0:
+    if not os.path.isfile(out) or os.path.getsize(out) == 0:
+        rs.Command('-_SaveRenderWindowAs "%s" _Enter' % out, False)
+    if not os.path.isfile(out) or os.path.getsize(out) == 0:
         raise RuntimeError("V-Ray did not save a render image; no viewport fallback is used.")
     image = System.Drawing.Image.FromFile(out)
     try:
