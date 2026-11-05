@@ -19,7 +19,9 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import struct
 import sys
+import threading
 import tempfile
 import time
 from pathlib import Path
@@ -76,77 +78,135 @@ def progress(job_id: int, pct: int, stage: str) -> None:
         pass
 
 
+def script_error(path: Path, fallback: str) -> RuntimeError:
+    if path.exists():
+        return RuntimeError(path.read_text(encoding="utf-8", errors="replace")[-3500:])
+    return RuntimeError(fallback)
+
+
+def png_size(path: Path) -> tuple[int, int]:
+    with open(path, "rb") as fh:
+        header = fh.read(24)
+    if len(header) != 24 or header[:8] != b"\x89PNG\r\n\x1a\n" or header[12:16] != b"IHDR":
+        raise RuntimeError("The render output is not a valid PNG.")
+    return struct.unpack(">II", header[16:24])
+
+
+def validate_render_output(out_dir: Path, error: Path, width: int, height: int) -> tuple[Path, dict]:
+    if error.exists():
+        raise script_error(error, "Rhino render failed.")
+    manifest_path = out_dir / "manifest.json"
+    if not manifest_path.is_file():
+        raise RuntimeError("Rhino did not produce a completed render manifest. No render was uploaded.")
+    try:
+        meta = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (ValueError, OSError) as exc:
+        raise RuntimeError("Rhino produced an invalid render manifest.") from exc
+    is_stub = (meta.get("engine") == "stub-rhino" and meta.get("simulation") is True
+               and os.environ.get("FF_ALLOW_STUB") == "1")
+    if meta.get("protocol") != 1 or (meta.get("engine") != "V-Ray" and not is_stub):
+        raise RuntimeError("The render was not confirmed as V-Ray (stub requires FF_ALLOW_STUB=1).")
+    if meta.get("image") != "render.png":
+        raise RuntimeError("Render manifest does not name render.png.")
+    image = out_dir / "render.png"
+    if not image.is_file() or png_size(image) != (width, height):
+        raise RuntimeError(f"Render image is missing or not the requested {width}x{height} size.")
+    if (meta.get("width"), meta.get("height")) != (width, height):
+        raise RuntimeError("Render manifest dimensions do not match the requested size.")
+    return image, meta
+
+
 def do_analyze(job: dict, model: dict) -> None:
     with tempfile.TemporaryDirectory(prefix="ff_") as td:
         td = Path(td)
-        model_path = td / (model["original_name"] or "model.dwg")
+        filename = Path((model.get("original_name") or "model.dwg").replace("\\", "/")).name
+        model_path = td / (filename or "model.dwg")
         download(model["file_url"], model_path)
         out_json = td / "structure.json"
         out_png = td / "preview.png"
-        progress(job["id"], 10, "Importing in Rhino 8")
+        out_geometry = td / "geometry.json"
+        progress(job["id"], 10, "Worker: importing model")
         console = run_rhino(HERE / "rhino_scripts" / "analyze_model.py", {
-            "FF_MODEL": str(model_path),
-            "FF_OUT_JSON": str(out_json),
-            "FF_OUT_PNG": str(out_png),
+            "FF_MODEL": str(model_path), "FF_OUT_JSON": str(out_json),
+            "FF_OUT_PNG": str(out_png), "FF_OUT_GEOMETRY": str(out_geometry),
         })
-        if not out_json.exists():
-            raise RuntimeError(f"Rhino produced no structure.json. Console output: {console[-1500:]}")
-        structure = json.loads(out_json.read_text())
-        progress(job["id"], 90, "Uploading structure")
-        files = None
-        fh = None
-        if out_png.exists():
-            fh = open(out_png, "rb")
-            files = {"files": ("preview.png", fh, "image/png")}
-        try:
-            r = requests.post(f"{API}/api/agent/jobs/{job['id']}/complete",
-                              data={"structure": json.dumps(structure)},
-                              files=files, timeout=120)
-            r.raise_for_status()
-        finally:
-            if fh:
-                fh.close()
+        error = Path(str(out_json) + ".error.txt")
+        if error.exists() or not out_json.exists():
+            raise script_error(error, f"Rhino produced no structure.json. Console: {console[-1500:]}")
+        structure = json.loads(out_json.read_text(encoding="utf-8"))
+        if structure.get("target_schema") != "rhino-geometry-v1" or not out_geometry.is_file():
+            raise RuntimeError("Rhino analysis did not produce the expected structure and geometry preview.")
+        progress(job["id"], 90, "Uploading structure and geometry")
+        with open(out_geometry, "rb") as geometry:
+            files = [("geometry", ("geometry.json", geometry, "application/json"))]
+            if out_png.exists():
+                with open(out_png, "rb") as preview:
+                    files.append(("files", ("preview.png", preview, "image/png")))
+                    r = requests.post(f"{API}/api/agent/jobs/{job['id']}/complete",
+                                      data={"structure": json.dumps(structure)}, files=files, timeout=300)
+            else:
+                r = requests.post(f"{API}/api/agent/jobs/{job['id']}/complete",
+                                  data={"structure": json.dumps(structure)}, files=files, timeout=300)
+        r.raise_for_status()
 
 
 def do_render(job: dict, model: dict, settings: dict, assignments: list) -> None:
+    if (model.get("structure") or {}).get("target_schema") != "rhino-geometry-v1":
+        raise RuntimeError("Re-analyze this model with the updated Rhino worker before rendering.")
     with tempfile.TemporaryDirectory(prefix="ff_") as td:
         td = Path(td)
-        model_path = td / (model["original_name"] or "model.dwg")
-        if model.get("file_url"):
-            download(model["file_url"], model_path)
+        filename = Path((model.get("original_name") or "model.dwg").replace("\\", "/")).name
+        model_path = td / (filename or "model.dwg")
+        if not model.get("file_url"):
+            raise RuntimeError("Model file is missing.")
+        download(model["file_url"], model_path)
         assign_path = td / "assignments.json"
-        assign_path.write_text(json.dumps(assignments))
-        out_dir = td / "out"
+        assign_path.write_text(json.dumps(assignments), encoding="utf-8")
+        structure_path = td / "structure.json"
+        structure_path.write_text(json.dumps(model["structure"]), encoding="utf-8")
+        out_dir, tex_dir = td / "results", td / "textures"
         out_dir.mkdir()
-        progress(job["id"], 5, "Rhino 8: applying V-Ray materials")
+        tex_dir.mkdir()
+        error = td / "rhino_error.txt"
+        width, height = int(settings.get("width", 1920)), int(settings.get("height", 1080))
+        progress(job["id"], 5, "Worker: preparing model and materials")
         console = run_rhino(HERE / "rhino_scripts" / "render_model.py", {
-            "FF_MODEL": str(model_path),
-            "FF_ASSIGNMENTS": str(assign_path),
-            "FF_OUT_DIR": str(out_dir),
-            "FF_WIDTH": str(settings.get("width", 1920)),
-            "FF_HEIGHT": str(settings.get("height", 1080)),
-            "FF_QUALITY": str(settings.get("quality", "standard")),
+            "FF_MODEL": str(model_path), "FF_ASSIGNMENTS": str(assign_path),
+            "FF_STRUCTURE": str(structure_path), "FF_OUT_DIR": str(out_dir),
+            "FF_TEX_DIR": str(tex_dir), "FF_ERROR": str(error),
+            "FF_WIDTH": str(width), "FF_HEIGHT": str(height),
+            "FF_QUALITY": str(settings.get("quality", "current")),
             "FF_CAMERA": str(settings.get("camera", "iso")),
+            "FF_API": API,
         })
-        imgs = sorted(out_dir.glob("*.png")) + sorted(out_dir.glob("*.jpg"))
-        if not imgs:
-            raise RuntimeError(f"render script produced no images. Console output: {console[-1500:]}")
-        progress(job["id"], 92, "Uploading renders")
-        files = [("files", (p.name, open(p, "rb"), "image/png")) for p in imgs]
+        if error.exists():
+            raise script_error(error, "Rhino render failed.")
         try:
+            image, meta = validate_render_output(out_dir, error, width, height)
+        except RuntimeError as exc:
+            raise RuntimeError(f"{exc} Rhino console: {console[-1200:]}") from exc
+        progress(job["id"], 92, "Uploading verified render")
+        with open(image, "rb") as fh:
             r = requests.post(f"{API}/api/agent/jobs/{job['id']}/complete",
-                              files=files, timeout=300)
-            r.raise_for_status()
-        finally:
-            for _, (_, fh, _) in files:
-                fh.close()
+                              data={"manifest": json.dumps(meta)},
+                              files={"files": ("render.png", fh, "image/png")}, timeout=300)
+        r.raise_for_status()
+
+
+def heartbeat_while_busy(stop: threading.Event, name: str) -> None:
+    # Polling /jobs/next while busy would claim another job, so use a dedicated beat.
+    while not stop.wait(20):
+        try:
+            requests.post(f"{API}/api/agent/heartbeat", json={"name": name}, timeout=10)
+        except requests.RequestException:
+            pass
 
 
 def main() -> int:
     import socket
     who = socket.gethostname()
     log(f"polling {API} every {POLL}s as '{who}' (Rhino: {RHINO})")
-    log("server runs in auto mode: while this agent polls, jobs route here; otherwise they simulate")
+    log("Server auto mode can simulate when no worker is connected; use RENDER_RUNNER=agent to wait instead.")
     while True:
         try:
             r = requests.get(f"{API}/api/agent/jobs/next", params={"name": who}, timeout=30)
@@ -161,6 +221,9 @@ def main() -> int:
             time.sleep(POLL)
             continue
         log(f"claimed job #{job['id']} ({job['kind']})")
+        stop = threading.Event()
+        thread = threading.Thread(target=heartbeat_while_busy, args=(stop, who), daemon=True)
+        thread.start()
         try:
             if job["kind"] == "analyze":
                 do_analyze(job, payload["model"])
@@ -175,6 +238,9 @@ def main() -> int:
                               json={"error": str(exc)[:4000]}, timeout=15)
             except requests.RequestException:
                 pass
+        finally:
+            stop.set()
+            thread.join(timeout=2)
     return 0
 
 

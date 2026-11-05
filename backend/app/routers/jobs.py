@@ -36,7 +36,12 @@ def create_render_job(body: RenderJobIn, db: Session = Depends(get_db)):
         raise HTTPException(404, "model not found")
     if m.status != "ready" or not m.structure:
         raise HTTPException(409, "model is not analyzed yet — wait for the analyze job to finish")
-    j = runner.create_job(db, "render", m.id, body.settings.model_dump())
+    selected_runner = runner.pick_runner()
+    if selected_runner == "agent" and (m.structure or {}).get("target_schema") != "rhino-geometry-v1":
+        raise HTTPException(409, "Re-analyze this model with the updated Rhino worker before a real render.")
+    if selected_runner == "agent" and body.settings.quality != "current":
+        raise HTTPException(409, "V-Ray uses its current settings. Refresh the render dialog and retry.")
+    j = runner.create_job(db, "render", m.id, body.settings.model_dump(), selected_runner=selected_runner)
     return job_out(j, db)
 
 

@@ -52,7 +52,9 @@ def do_analyze():
     structure = {
         "units": "inches",
         "source_file": os.path.basename(model),
-        "analyzer": "rhino8-worker 1.0 (stub-rhino transport test — NOT real Rhino)",
+        "analyzer": "stub-rhino transport test — NOT real Rhino",
+        "target_schema": "rhino-geometry-v1",
+        "geometry_status": "complete",
         "extents": {"min": [0, 0, 0], "max": [48, 20, 72]},
         "layers": [
             {"name": "STUB-CASE", "color": "#b5651d", "part_count": 1},
@@ -69,6 +71,14 @@ def do_analyze():
     }
     with open(out_json, "w") as fh:
         json.dump(structure, fh)
+    # Two simple triangles are intentionally synthetic, not imported CAD geometry.
+    geometry = {"version": 1, "units": "inches", "parts": [
+        {"id": "p001", "positions": [0, 0, 0, 48, 0, 0, 0, 0, 72],
+         "triangles": [0, 1, 2], "lines": []},
+        {"id": "p002", "positions": [4, 2, 30, 44, 2, 30, 44, 2, 40],
+         "triangles": [0, 1, 2], "lines": []}]}
+    with open(os.environ["FF_OUT_GEOMETRY"], "w") as fh:
+        json.dump(geometry, fh)
     if out_png:
         make_png(out_png, 400, 300, "preview")
     print("ANALYZE_OK 2 parts (stub)")
@@ -76,10 +86,13 @@ def do_analyze():
 
 def do_render():
     out_dir = os.environ["FF_OUT_DIR"]
-    w = min(int(os.environ.get("FF_WIDTH", "640")), 1280)
-    h = min(int(os.environ.get("FF_HEIGHT", "400")), 800)
+    w = int(os.environ.get("FF_WIDTH", "640"))
+    h = int(os.environ.get("FF_HEIGHT", "400"))
     os.makedirs(out_dir, exist_ok=True)
     make_png(os.path.join(out_dir, "render.png"), w, h, "render")
+    with open(os.path.join(out_dir, "manifest.json"), "w") as fh:
+        json.dump({"protocol": 1, "engine": "stub-rhino", "simulation": True,
+                   "image": "render.png", "width": w, "height": h}, fh)
     print("RENDER_OK %dx%d (stub)" % (w, h))
 
 

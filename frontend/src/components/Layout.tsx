@@ -71,7 +71,7 @@ export default function Layout() {
             <div className="mt-1 flex items-start gap-2 text-xs text-zinc-300">
               <span className={`mt-1 h-2 w-2 shrink-0 rounded-full ${sys?.agent_connected ? "animate-pulse bg-emerald-400" : "bg-amber-400"}`} />
               <span>
-                {sys ? (sys.agent_connected ? "Rhino worker connected" : sys.mode === "agent" ? "Waiting for Rhino worker…" : "Simulated engine") : "…"}
+                {sys ? (sys.agent_connected ? "Worker connected" : sys.mode === "agent" ? "Waiting for Rhino worker…" : "Simulated engine") : "…"}
                 {sys?.agent_connected && sys.agent_name && (
                   <span className="block text-[11px] text-emerald-400/80">
                     {sys.agent_name}

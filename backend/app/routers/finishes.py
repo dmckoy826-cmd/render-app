@@ -1,11 +1,14 @@
 """Finish (swatch) library: upload PNG/JPG laminate, PET and product-finish images."""
 from __future__ import annotations
 
+import io
+import math
 import re
 import uuid
 
 from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile
 from pydantic import BaseModel
+from PIL import Image
 from sqlalchemy.orm import Session
 
 from .. import imaging
@@ -85,8 +88,9 @@ async def create_finish(
         raise HTTPException(400, f"unsupported image type '{ext}' — use PNG, JPG or WEBP")
     if category not in ("laminate", "pet", "product_finish", "other"):
         raise HTTPException(400, "category must be laminate | pet | product_finish | other")
-    if swatch_width_in <= 0 or swatch_height_in <= 0:
-        raise HTTPException(400, "swatch dimensions must be positive")
+    if (not math.isfinite(swatch_width_in) or not math.isfinite(swatch_height_in)
+            or swatch_width_in <= 0 or swatch_height_in <= 0):
+        raise HTTPException(400, "swatch dimensions must be finite and positive")
 
     stem = f"{uuid.uuid4().hex[:10]}_{_safe_name(orig)}"
     if not stem.lower().endswith(tuple(ALLOWED_EXT)):
@@ -95,6 +99,14 @@ async def create_finish(
     data = await file.read()
     if not data:
         raise HTTPException(400, "empty file")
+    try:
+        with Image.open(io.BytesIO(data)) as image:
+            expected = {".png": "PNG", ".jpg": "JPEG", ".jpeg": "JPEG", ".webp": "WEBP"}[ext]
+            if image.format != expected:
+                raise ValueError("file type does not match extension")
+            image.load()  # fully decode before a worker ever tries to apply it
+    except Exception as exc:
+        raise HTTPException(400, f"Invalid or unreadable swatch image: {exc}") from exc
     (MEDIA_DIR / rel).write_bytes(data)
 
     thumb_rel = f"thumbs/{stem}.jpg"
@@ -120,9 +132,9 @@ def patch_finish(finish_id: int, patch: FinishPatch, db: Session = Depends(get_d
     if not f:
         raise HTTPException(404, "finish not found")
     data = patch.model_dump(exclude_none=True)
-    if "swatch_width_in" in data and data["swatch_width_in"] <= 0:
+    if "swatch_width_in" in data and (not math.isfinite(data["swatch_width_in"]) or data["swatch_width_in"] <= 0):
         raise HTTPException(400, "swatch width must be positive")
-    if "swatch_height_in" in data and data["swatch_height_in"] <= 0:
+    if "swatch_height_in" in data and (not math.isfinite(data["swatch_height_in"]) or data["swatch_height_in"] <= 0):
         raise HTTPException(400, "swatch height must be positive")
     if "category" in data and data["category"] not in ("laminate", "pet", "product_finish", "other"):
         raise HTTPException(400, "invalid category")

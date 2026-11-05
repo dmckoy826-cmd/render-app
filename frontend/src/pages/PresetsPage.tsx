@@ -48,7 +48,7 @@ export default function PresetsPage() {
       <header className="mb-6 flex items-end justify-between">
         <div>
           <h1 className="text-xl font-semibold text-zinc-100">Mapping presets</h1>
-          <p className="mt-1 text-sm text-zinc-500">Reusable rules: layer/block name pattern → finish. Apply to any model in one click.</p>
+          <p className="mt-1 text-sm text-zinc-500">Reusable layer, block and part rules. Geometry-identity rules only match the same analyzed geometry.</p>
         </div>
         <button onClick={() => open("new")} className="rounded-lg bg-amber-500 px-4 py-2 text-sm font-medium text-zinc-950 hover:bg-amber-400">
           New preset
@@ -69,7 +69,7 @@ export default function PresetsPage() {
             <div className="mt-3 flex flex-wrap gap-2">
               {p.rules.map((r, i) => (
                 <span key={i} className="flex items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[11px] text-zinc-400">
-                  <span className="text-zinc-600">{r.match}</span>
+                  <span className="text-zinc-600">{r.target_property === "identity" ? "exact geometry" : `${r.target_kind} ${r.match}`}</span>
                   <code className="text-amber-300">{r.pattern}</code>
                   <svg viewBox="0 0 24 24" className="h-3 w-3 text-zinc-600" fill="none" stroke="currentColor" strokeWidth="2"><path d="M5 12h14m-6-6 6 6-6 6" /></svg>
                   {r.finish_thumb && <img src={r.finish_thumb} alt="" className="h-4 w-4 rounded object-cover" />}
@@ -108,18 +108,23 @@ export default function PresetsPage() {
             <div className="space-y-2">
               {rules.map((r, i) => (
                 <div key={i} className="flex items-center gap-2">
-                  <select value={r.match} onChange={(e) => setRules(rules.map((x, j) => (j === i ? { ...x, match: e.target.value as PresetRule["match"] } : x)))}
+                  <select value={r.match} onChange={(e) => setRules(rules.map((x, j) => (j === i ? { ...x, match: e.target.value as PresetRule["match"], target_property: e.target.value === "exact" ? x.target_property : "name" } : x)))}
                     className="rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-300 outline-none">
                     <option value="contains">contains</option>
                     <option value="starts_with">starts with</option>
                     <option value="exact">exact</option>
                     <option value="regex">regex</option>
                   </select>
-                  <select value={r.target_kind} onChange={(e) => setRules(rules.map((x, j) => (j === i ? { ...x, target_kind: e.target.value as PresetRule["target_kind"] } : x)))}
+                  <select value={r.target_kind} onChange={(e) => setRules(rules.map((x, j) => (j === i ? { ...x, target_kind: e.target.value as PresetRule["target_kind"], target_property: "name" } : x)))}
                     className="rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-300 outline-none">
                     <option value="layer">layer</option>
                     <option value="block">block</option>
+                    <option value="part">part</option>
                   </select>
+                  {r.target_kind === "part" && <select value={r.target_property || "name"} onChange={(e) => setRules(rules.map((x, j) => (j === i ? { ...x, target_property: e.target.value as PresetRule["target_property"], match: e.target.value === "identity" ? "exact" : x.match } : x)))}
+                    className="rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-300 outline-none">
+                    <option value="name">name</option><option value="identity">geometry ID</option>
+                  </select>}
                   <input value={r.pattern} placeholder="PATTERN"
                     onChange={(e) => setRules(rules.map((x, j) => (j === i ? { ...x, pattern: e.target.value } : x)))}
                     className="w-36 rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-1.5 font-mono text-xs text-amber-300 outline-none focus:border-amber-500/60" />
@@ -128,6 +133,9 @@ export default function PresetsPage() {
                     className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-300 outline-none">
                     {(finishes.data || []).map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}
                   </select>
+                  <input type="number" min="0.01" step="0.1" title="Scale multiplier" value={r.scale_multiplier ?? 1}
+                    onChange={(e) => setRules(rules.map((x, j) => (j === i ? { ...x, scale_multiplier: Number(e.target.value) } : x)))}
+                    className="w-16 rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-300" />
                   <button onClick={() => setRules(rules.filter((_, j) => j !== i))} className="p-1 text-zinc-600 hover:text-red-400">✕</button>
                 </div>
               ))}

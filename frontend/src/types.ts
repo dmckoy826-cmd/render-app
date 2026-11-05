@@ -26,6 +26,11 @@ export interface Part {
   block: string | null;
   requires_block_edit: boolean;
   bbox: BBox;
+  block_ancestors?: string[];
+  block_paths?: string[][];
+  occurrence_count?: number;
+  matching_objects?: number;
+  renderable?: boolean;
 }
 
 export interface LayerInfo {
@@ -45,6 +50,10 @@ export interface Structure {
   units: string;
   source_file?: string;
   analyzer?: string;
+  target_schema?: string;
+  geometry_url?: string;
+  geometry_status?: "complete" | "partial";
+  geometry_warnings?: string[];
   extents: BBox;
   layers: LayerInfo[];
   blocks: BlockInfo[];
@@ -115,6 +124,7 @@ export interface RenderResult {
   height: number;
   camera: string;
   quality: string;
+  source: string;
   duration_s: number;
   finishes: { finish_id: number; name: string; category: Category; thumb: string; targets: string[] }[];
   created_at: string | null;
@@ -125,6 +135,8 @@ export interface PresetRule {
   pattern: string;
   finish_id: number;
   target_kind: "layer" | "block" | "part";
+  target_property?: "name" | "identity";
+  scale_multiplier?: number;
   finish_name?: string;
   finish_thumb?: string;
 }

@@ -19,7 +19,7 @@ export default function GalleryPage() {
     <div className="mx-auto max-w-7xl px-8 py-8">
       <header className="mb-6">
         <h1 className="text-xl font-semibold text-zinc-100">Renders</h1>
-        <p className="mt-1 text-sm text-zinc-500">Finished V-Ray outputs with the finish schedule used.</p>
+        <p className="mt-1 text-sm text-zinc-500">Render results and finish schedules; simulated test outputs are labeled.</p>
       </header>
 
       <div className="grid grid-cols-1 gap-5 md:grid-cols-2 xl:grid-cols-3">
@@ -34,7 +34,8 @@ export default function GalleryPage() {
                 <span className="shrink-0 text-[11px] text-zinc-600">{fmtDate(r.created_at)}</span>
               </div>
               <div className="mt-1.5 flex items-center gap-2 text-[11px] text-zinc-500">
-                <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-zinc-400">{r.quality}</span>
+                <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-zinc-400">{r.source}</span>
+                <span className="text-zinc-400">{r.quality}</span>
                 <span>{r.camera}</span>
                 <span>{r.width}×{r.height}</span>
                 <span>{r.duration_s.toFixed(1)}s</span>
@@ -65,7 +66,7 @@ export default function GalleryPage() {
           <div>
             <img src={view.image_url} alt="" className="w-full rounded-lg border border-zinc-800" />
             <div className="mt-3 flex items-center justify-between text-xs text-zinc-500">
-              <span>{view.quality} · {view.camera} · {view.width}×{view.height} · {view.duration_s.toFixed(1)}s · {fmtDate(view.created_at)}</span>
+              <span>{view.source} · {view.quality} · {view.camera} · {view.width}×{view.height} · {view.duration_s.toFixed(1)}s · {fmtDate(view.created_at)}</span>
               <a href={view.image_url} download={`${view.model_name}-${view.id}.png`}
                 className="rounded-lg border border-zinc-700 px-3 py-1.5 text-zinc-300 hover:bg-zinc-800">Download PNG</a>
             </div>

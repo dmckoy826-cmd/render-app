@@ -7,12 +7,13 @@ import type { ModelSummary } from "../types";
 
 export function SourceBadge({ analyzer, className = "" }: { analyzer: string; className?: string }) {
   const a = analyzer || "";
-  const true_ = a.startsWith("dxf") || a.startsWith("rhino");
+  const realRhino = a.startsWith("rhino") && !/fake|stub/i.test(a);
+  const true_ = a.startsWith("dxf") || realRhino;
   return (
     <span className={`rounded border px-1.5 py-0.5 text-[10px] ${true_
       ? "border-emerald-600/40 bg-emerald-950/85 text-emerald-300"
       : "border-amber-600/40 bg-amber-950/85 text-amber-300"} ${className}`}>
-      {a.startsWith("dxf") ? "DXF · true geometry" : a.startsWith("rhino") ? "RHINO · true geometry" : "SIM · placeholder structure"}
+      {a.startsWith("dxf") ? "DXF · parsed structure" : realRhino ? "RHINO · analyzed" : "SIM · placeholder structure"}
     </span>
   );
 }

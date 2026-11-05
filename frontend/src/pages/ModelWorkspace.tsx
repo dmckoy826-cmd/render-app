@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api, fmtDate, toast } from "../api";
 import { usePoll } from "../hooks";
@@ -7,9 +7,20 @@ import FinishPicker from "../components/FinishPicker";
 import JobProgress, { StatusChip } from "../components/JobProgress";
 import RenderDialog from "../components/RenderDialog";
 import Modal from "../components/Modal";
-import type { Assignment, Finish, ModelDetail, Preset, RenderResult, Suggestion } from "../types";
+import type { Assignment, Finish, ModelDetail, Part, Preset, RenderResult, Suggestion } from "../types";
 
-type Target = { kind: "layer" | "block" | "part"; name: string };
+type Target = { kind: "layer" | "block" | "part"; name: string; label?: string };
+
+function AssignmentScale({ value, onSave }: { value: number; onSave: (n: number) => void }) {
+  const [draft, setDraft] = useState(String(value));
+  useEffect(() => setDraft(String(value)), [value]);
+  return <label className="flex items-center gap-1 text-[10px] text-zinc-500" title="Texture size multiplier: 2 makes the swatch twice as wide and tall">
+    scale ×<input type="number" min="0.01" step="0.1" value={draft} aria-label="Texture size multiplier"
+      onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
+      onBlur={() => { const n = Number(draft); if (!Number.isFinite(n) || n <= 0) setDraft(String(value)); else if (n !== value) onSave(n); }}
+      className="w-14 rounded border border-zinc-700 bg-zinc-950 px-1 py-1 text-xs text-zinc-300" />
+  </label>;
+}
 
 export default function ModelWorkspace() {
   const { id } = useParams();
@@ -25,6 +36,8 @@ export default function ModelWorkspace() {
   const [presetName, setPresetName] = useState("");
   const [renderOpen, setRenderOpen] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [partSearch, setPartSearch] = useState("");
+  const [partLimit, setPartLimit] = useState(100);
 
   const assign = async (t: Target, finishId: number | null, scale = 1) => {
     try {
@@ -41,28 +54,43 @@ export default function ModelWorkspace() {
     if (!model?.structure) return [];
     const byKind = { layer: new Map<string, Assignment>(), block: new Map<string, Assignment>(), part: new Map<string, Assignment>() };
     for (const a of model.assignments) byKind[a.target_kind]?.set(a.target_name, a);
+    const stableTargets = model.structure.target_schema === "rhino-geometry-v1";
+    const colors = new Map(model.structure.layers.map((layer) => [layer.name, layer.color]));
     return model.structure.parts.map((p) => {
-      const a = byKind.part.get(p.name) || (p.block ? byKind.block.get(p.block) : undefined) || byKind.layer.get(p.layer);
+      const direct = byKind.part.get(stableTargets ? p.id : p.name);
+      const paths = p.block_paths?.length ? p.block_paths : [p.block ? [p.block] : []];
+      const resolved = paths.map((path) => direct || [...path].reverse().map((b) => byKind.block.get(b)).find(Boolean) || byKind.layer.get(p.layer));
+      const values = new Set(resolved.map((a) => a ? `${a.finish_id}:${a.scale_multiplier}` : "unassigned"));
+      const conflict = values.size > 1;
+      const a = conflict ? undefined : resolved[0];
       return {
-        id: p.id,
-        name: p.name,
-        bbox: p.bbox,
-        rbe: p.requires_block_edit,
-        color: model.structure!.layers.find((l) => l.name === p.layer)?.color || "#71717a",
+        id: p.id, name: p.name, bbox: p.bbox, rbe: p.requires_block_edit, conflict,
+        color: colors.get(p.layer) || "#71717a",
         finish: a?.finish ? {
-          url: a.finish.image_url,
-          sw_w: a.finish.swatch_width_in,
-          sw_h: a.finish.swatch_height_in,
-          scale: a.scale_multiplier || 1,
-          metallic: a.finish.category === "product_finish",
+          url: a.finish.image_url, sw_w: a.finish.swatch_width_in, sw_h: a.finish.swatch_height_in,
+          scale: a.scale_multiplier || 1, metallic: false,  // category alone does not imply a metal shader
         } : null,
       };
     });
   }, [model]);
+  // Polling returns fresh objects every two seconds. Do not rebuild potentially large
+  // Three.js meshes or reset the camera unless geometry/material data actually changes.
+  const stableItemsRef = useRef<{ key: string; value: ViewerItem[] }>({ key: "", value: [] });
+  const itemsKey = JSON.stringify(items);
+  if (stableItemsRef.current.key !== itemsKey) stableItemsRef.current = { key: itemsKey, value: items };
+  const stableItems = stableItemsRef.current.value;
+  const partTarget = (p: { id: string; name: string }) =>
+    model?.structure?.target_schema === "rhino-geometry-v1" ? p.id : p.name;
 
   const assignFor = (t: Target): Assignment | undefined =>
     model?.assignments.find((a) => a.target_kind === t.kind && a.target_name === t.name);
 
+  const partById = useMemo(() => new Map((model?.structure?.parts || []).map((part) => [part.id, part])), [model?.structure]);
+  const matchingParts = useMemo(() => {
+    const query = partSearch.trim().toLowerCase();
+    const parts = model?.structure?.parts || [];
+    return query ? parts.filter((p) => `${p.name} ${p.layer} ${p.block || ""} ${p.id}`.toLowerCase().includes(query)) : parts;
+  }, [model?.structure, partSearch]);
   const analyzeJob = model?.jobs?.find((j) => j.kind === "analyze");
   const activeJobs = (model?.jobs || []).filter((j) => j.status === "queued" || j.status === "running");
 
@@ -111,26 +139,25 @@ export default function ModelWorkspace() {
         </div>
       </header>
 
-      {/* structure-source banner */}
+      {/* Analysis source does not imply a mesh preview or a validated V-Ray render. */}
       {model.structure && (() => {
         const a = model.structure!.analyzer || "";
-        const simulated = !a.startsWith("dxf") && !a.startsWith("rhino");
-        return (
-          <div className={`mx-6 mt-4 rounded-lg border px-4 py-3 text-xs leading-relaxed ${simulated
-            ? "border-amber-700/50 bg-amber-950/20 text-amber-200"
-            : "border-emerald-700/50 bg-emerald-950/20 text-emerald-200"}`}>
-            {simulated
-              ? <>
-                  <span className="font-semibold">Simulated structure.</span>{" "}
-                  The built-in engine cannot read binary DWG internals, so the layers, blocks and parts
-                  below are placeholders synthesized from the file name — not your drawing's geometry.
-                  For true geometry: <span className="font-medium">export DXF from AutoCAD and re-upload</span> (parsed
-                  for real, including layers, block definitions and bounding boxes), or connect the Rhino worker
-                  on your licensed machine (<code className="text-amber-300">worker/README.md</code>).
-                </>
-              : <>True geometry parsed by <code>{a}</code> — layers, block definitions and part bounds come from your file.</>}
-          </div>
-        );
+        const rhino = a.startsWith("rhino") && !/fake|stub/i.test(a) && model.structure!.target_schema === "rhino-geometry-v1";
+        const synthetic = /fake|stub/i.test(a) && model.structure!.target_schema === "rhino-geometry-v1";
+        const parsed = a.startsWith("dxf") || rhino;
+        const conflicts = items.filter((item) => item.conflict).length;
+        return <div className={`mx-6 mt-4 rounded-lg border px-4 py-3 text-xs leading-relaxed ${parsed
+          ? "border-emerald-700/50 bg-emerald-950/20 text-emerald-200"
+          : "border-amber-700/50 bg-amber-950/20 text-amber-200"}`}>
+          {rhino ? <>Analyzed by <code>{a}</code>. Nested block layers and selectable geometry are included.
+            Block edits apply to every reference of the same definition; identical overlapping objects may share a target.</>
+            : synthetic ? <>Synthetic test geometry, not imported CAD. Connect the real Rhino worker and re-analyze before rendering.</>
+            : a.startsWith("dxf") ? <>DXF structure was parsed, but this viewer only has bounding boxes. Re-analyze with the Rhino worker for a tessellated preview.</>
+            : <>Placeholder or older analysis: the viewer shows bounding boxes, not the imported model.
+                Connect the Rhino worker and re-analyze before a real render.</>}
+          {model.structure!.geometry_warnings?.map((warning) => <div key={warning} className="mt-1 text-amber-300">{warning}</div>)}
+          {conflicts > 0 && <div className="mt-1 font-semibold text-amber-300">{conflicts} shared part(s) have conflicting block assignments. The real render will reject them.</div>}
+        </div>;
       })()}
 
       {/* body */}
@@ -152,11 +179,13 @@ export default function ModelWorkspace() {
         <div className="grid min-h-0 flex-1 grid-cols-1 xl:grid-cols-[1fr_420px]">
           {/* viewer */}
           <div className="relative min-h-[420px] border-b border-zinc-800 bg-gradient-to-b from-zinc-900 to-zinc-950 xl:border-b-0 xl:border-r">
-            <Viewer3D items={items} selected={selected}
+            <Viewer3D items={stableItems} selected={selected} geometryUrl={model.structure?.geometry_url}
+              partial={model.structure?.geometry_status === "partial"}
+              simulatedGeometry={!model.structure?.analyzer?.startsWith("rhino") || /fake|stub/i.test(model.structure?.analyzer || "")}
               onSelect={(pid) => setSelected(pid ? new Set([pid]) : new Set())} />
             <div className="pointer-events-none absolute left-4 top-4 rounded-lg border border-zinc-800/80 bg-zinc-950/70 px-3 py-2 text-[11px] text-zinc-400 backdrop-blur">
               Drag to orbit · scroll to zoom · click a part to select
-              <span className="ml-2 text-cyan-400">cyan outline = inside block (BlockEdit)</span>
+              <span className="ml-2 text-cyan-400">block targets affect shared definitions</span>
             </div>
           </div>
 
@@ -173,6 +202,26 @@ export default function ModelWorkspace() {
             <div className="min-h-0 flex-1 overflow-y-auto p-4">
               {tab === "structure" && model.structure && (
                 <div className="space-y-5">
+                  {selected.size === 1 && (() => {
+                    const p = model.structure!.parts.find((part) => selected.has(part.id));
+                    if (!p) return null;
+                    const target = partTarget(p);
+                    const assigned = assignFor({ kind: "part", name: target });
+                    return <section className="rounded-lg border border-amber-700/40 bg-amber-950/10 p-3">
+                      <div className="text-xs uppercase tracking-wide text-amber-300">Selected part</div>
+                      <div className="mt-1 text-sm text-zinc-200">{p.name}</div>
+                      <p className="mt-1 text-xs text-zinc-500">{p.layer}{p.block ? ` · in ${p.block} (all references)` : ""}
+                        {p.occurrence_count && p.occurrence_count > 1 ? ` · ${p.occurrence_count} occurrences` : ""}
+                        {p.matching_objects && p.matching_objects > 1 ? ` · ${p.matching_objects} indistinguishable objects share this target` : ""}
+                        {p.renderable === false ? " · linework, not a renderable surface" : ""}
+                      </p>
+                      <div className="mt-2 flex items-center gap-2">
+                        <button onClick={() => setPicker({ kind: "part", name: target, label: p.name })}
+                          className="rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800">{assigned ? "Change override" : "Assign part override"}</button>
+                        {assigned && <button onClick={() => assign({ kind: "part", name: target }, null)} className="text-xs text-zinc-500 hover:text-red-400">Clear override</button>}
+                      </div>
+                    </section>;
+                  })()}
                   <section>
                     <h3 className="mb-2 text-xs uppercase tracking-wide text-zinc-500">Layers</h3>
                     <div className="space-y-1.5">
@@ -211,6 +260,7 @@ export default function ModelWorkspace() {
                       <div className="space-y-3">
                         {model.structure.blocks.map((b) => {
                           const a = assignFor({ kind: "block", name: b.name });
+                          const blockParts = b.part_ids.map((id) => partById.get(id)).filter((part): part is Part => !!part);
                           return (
                             <div key={b.name} className="rounded-lg border border-cyan-900/50 bg-cyan-950/10 p-3">
                               <div className="flex items-center gap-2">
@@ -224,37 +274,62 @@ export default function ModelWorkspace() {
                                   <><img src={a.finish.thumb_url} alt="" className="h-6 w-6 rounded object-cover" />
                                     <span className="text-xs text-zinc-400">{a.finish.name}</span>
                                     <button onClick={() => assign({ kind: "block", name: b.name }, null)} className="text-zinc-600 hover:text-red-400">✕</button></>
-                                ) : <span className="text-[11px] text-zinc-600">inherits layer finishes</span>}
+                                ) : <span className="text-[11px] text-zinc-600">inherits parent / layer finishes</span>}
                                 <button onClick={() => setPicker({ kind: "block", name: b.name })}
                                   className="ml-auto rounded-lg border border-zinc-700 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800">
                                   {a ? "Change" : "Assign whole block"}
                                 </button>
                               </div>
                               <ul className="mt-2 space-y-1 border-t border-zinc-800/60 pt-2">
-                                {model.structure!.parts.filter((p) => p.block === b.name).map((p) => {
-                                  const pa = assignFor({ kind: "part", name: p.name });
+                                {blockParts.slice(0, 20).map((p) => {
+                                  const target = partTarget(p);
+                                  const pa = assignFor({ kind: "part", name: target });
                                   return (
                                     <li key={p.id} className="flex items-center gap-2 text-xs text-zinc-400">
                                       <button className="truncate hover:text-zinc-200" onClick={() => setSelected(new Set([p.id]))}>{p.name}</button>
                                       <span className="text-[10px] text-zinc-600">{p.layer}</span>
                                       <span className="ml-auto flex items-center gap-1">
                                         {pa?.finish && <img src={pa.finish.thumb_url} alt="" className="h-4 w-4 rounded object-cover" />}
-                                        <button onClick={() => setPicker({ kind: "part", name: p.name })}
+                                        <button onClick={() => setPicker({ kind: "part", name: target, label: p.name })}
                                           className="rounded border border-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800">
-                                          {pa ? "override" : "override"}
+                                          {pa ? "change" : "override"}
                                         </button>
-                                        {pa && <button onClick={() => assign({ kind: "part", name: p.name }, null)} className="text-zinc-600 hover:text-red-400">✕</button>}
+                                        {pa && <button onClick={() => assign({ kind: "part", name: target }, null)} className="text-zinc-600 hover:text-red-400">✕</button>}
                                       </span>
                                     </li>
                                   );
                                 })}
                               </ul>
+                              {blockParts.length > 20 && <p className="mt-1 text-[11px] text-zinc-500">Showing 20 of {blockParts.length} parts; use the search below for the rest.</p>}
                             </div>
                           );
                         })}
                       </div>
                     </section>
                   )}
+                  <section>
+                    <h3 className="mb-2 text-xs uppercase tracking-wide text-zinc-500">All parts · {matchingParts.length}</h3>
+                    <input value={partSearch} aria-label="Search parts" placeholder="Search name, layer or block"
+                      onChange={(event) => { setPartSearch(event.target.value); setPartLimit(100); }}
+                      className="mb-2 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-zinc-200 outline-none focus:border-amber-500/60" />
+                    <div className="max-h-80 space-y-1 overflow-y-auto">
+                      {matchingParts.slice(0, partLimit).map((p) => {
+                        const target = partTarget(p);
+                        const pa = assignFor({ kind: "part", name: target });
+                        const dims = p.bbox.max.map((value, index) => Math.round((value - p.bbox.min[index]) * 100) / 100).join(" × ");
+                        return <div key={p.id} className="flex items-center gap-2 rounded border border-zinc-800 bg-zinc-900/50 px-2 py-1.5">
+                          <button onClick={() => setSelected(new Set([p.id]))} className="min-w-0 flex-1 text-left">
+                            <span className="block truncate text-xs text-zinc-200">{p.name}</span>
+                            <span className="block truncate text-[10px] text-zinc-500">{p.layer}{p.block ? ` · ${p.block}` : " · top level"} · {dims} in{p.renderable === false ? " · linework" : ""}</span>
+                          </button>
+                          <button onClick={() => setPicker({ kind: "part", name: target, label: p.name })}
+                            className="rounded border border-zinc-700 px-2 py-1 text-[10px] text-zinc-300 hover:bg-zinc-800">{pa ? "Change" : "Assign"}</button>
+                        </div>;
+                      })}
+                    </div>
+                    {partLimit < matchingParts.length && <button onClick={() => setPartLimit((value) => value + 100)}
+                      className="mt-2 text-xs text-amber-400 hover:underline">Show more ({Math.min(partLimit, matchingParts.length)} of {matchingParts.length})</button>}
+                  </section>
                 </div>
               )}
 
@@ -271,9 +346,10 @@ export default function ModelWorkspace() {
                       <span className={`rounded border px-1.5 py-0.5 text-[10px] uppercase ${a.target_kind === "layer" ? "border-zinc-700 text-zinc-400" : a.target_kind === "block" ? "border-cyan-700/50 text-cyan-300" : "border-amber-700/50 text-amber-300"}`}>
                         {a.target_kind}
                       </span>
-                      <span className="min-w-0 flex-1 truncate text-sm text-zinc-200">{a.target_name}</span>
+                      <span className="min-w-0 flex-1 truncate text-sm text-zinc-200">{a.target_kind === "part" ? (model.structure?.parts.find((p) => partTarget(p) === a.target_name)?.name || `${a.target_name} (stale target)`) : a.target_name}</span>
                       {a.finish && <img src={a.finish.thumb_url} alt="" className="h-7 w-7 rounded object-cover" />}
                       <span className="w-32 truncate text-xs text-zinc-400">{a.finish?.name}</span>
+                      <AssignmentScale value={a.scale_multiplier} onSave={(scale) => assign({ kind: a.target_kind, name: a.target_name }, a.finish_id, scale)} />
                       <button onClick={() => setPicker({ kind: a.target_kind, name: a.target_name })}
                         className="rounded-lg border border-zinc-700 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800">Change</button>
                       <button onClick={() => assign({ kind: a.target_kind, name: a.target_name }, null)}
@@ -294,7 +370,7 @@ export default function ModelWorkspace() {
                       className="block overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950 hover:border-amber-500/50">
                       <img src={r.image_url} alt="" className="aspect-video w-full object-cover" />
                       <div className="flex items-center gap-2 p-2.5 text-[11px] text-zinc-500">
-                        <span className="text-zinc-300">{r.quality} · {r.camera}</span>
+                        <span className="text-zinc-300">{r.source} · {r.quality} · {r.camera}</span>
                         <span>{r.width}×{r.height}</span>
                         <span className="ml-auto">{fmtDate(r.created_at)}</span>
                       </div>
@@ -309,8 +385,8 @@ export default function ModelWorkspace() {
 
       {/* modals */}
       <FinishPicker open={!!picker} onClose={() => setPicker(null)}
-        title={picker ? `Assign finish → ${picker.kind}: ${picker.name}` : ""}
-        onPick={(f: Finish) => picker && assign(picker, f.id)} />
+        title={picker ? `Assign finish → ${picker.kind}: ${picker.label || (picker.kind === "part" ? model.structure?.parts.find((p) => partTarget(p) === picker.name)?.name : picker.name) || picker.name}` : ""}
+        onPick={(f: Finish) => picker && assign(picker, f.id, assignFor(picker)?.scale_multiplier || 1)} />
       <AutoMatchModal open={autoOpen} onClose={() => setAutoOpen(false)} modelId={modelId} onApplied={refresh} />
       <ApplyPresetModal open={applyOpen} onClose={() => setApplyOpen(false)} modelId={modelId} onApplied={refresh} />
       <Modal open={saveOpen} onClose={() => setSaveOpen(false)} title="Save mapping as preset">
@@ -318,8 +394,8 @@ export default function ModelWorkspace() {
         <input value={presetName} onChange={(e) => setPresetName(e.target.value)}
           className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-200 outline-none focus:border-amber-500/60" />
         <p className="mt-3 text-xs leading-relaxed text-zinc-500">
-          Rules are generated from the current layer assignments using each layer's most distinctive
-          token, so the preset also matches similar future drawings.
+          Layer and block rules use exact names; individual Rhino parts use exact geometry identities.
+          You can edit name rules later to match similar drawings. Review matches when applying a preset.
         </p>
         <div className="mt-4 flex justify-end gap-2">
           <button onClick={() => setSaveOpen(false)} className="rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-300 hover:bg-zinc-800">Cancel</button>

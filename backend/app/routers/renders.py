@@ -24,6 +24,10 @@ def render_out(r: Render, db: Session) -> dict:
         "height": r.height,
         "camera": r.camera,
         "quality": (j.settings or {}).get("quality", "standard") if j else "standard",
+        "source": ("SIMULATED" if j and j.runner == "mock" else
+                   "SIMULATED TEST" if j and (j.settings or {}).get("_simulation") else
+                   "V-RAY REPORTED" if j and (j.settings or {}).get("_engine") == "V-Ray" else
+                   "AGENT UNVERIFIED"),
         "duration_s": r.duration_s,
         "finishes": r.finishes_snapshot,
         "created_at": r.created_at.isoformat() if r.created_at else None,

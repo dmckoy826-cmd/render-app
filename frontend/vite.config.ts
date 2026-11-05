@@ -9,8 +9,8 @@ export default defineConfig({
     port: 5173,
     allowedHosts: true,
     proxy: {
-      "/api": "http://localhost:8000",
-      "/media": "http://localhost:8000",
+      "/api": "http://127.0.0.1:8000",
+      "/media": "http://127.0.0.1:8000",
     },
   },
 });
