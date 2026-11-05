@@ -149,9 +149,14 @@ def mapping_for(obj, sw_w, sw_h):
 def verify_object_mapping(obj, expected):
     # A mapping channel also carries an object transform; a non-identity transform
     # can change physical tile size even when the mapping itself looks correct.
-    box = clr.StrongBox[Rhino.Geometry.Transform]()
-    actual = obj.GetTextureMapping(1, box)
-    if actual is None or not box.Value.IsIdentity:
+    box = clr.StrongBox[Rhino.Geometry.Transform](Rhino.Geometry.Transform.Identity)
+    try:
+        actual = obj.GetTextureMapping(1, box)
+        xform = box.Value
+    except TypeError:
+        actual = obj.GetTextureMapping(1)
+        xform = Rhino.Geometry.Transform.Identity
+    if actual is None or (xform is not None and not xform.IsIdentity):
         raise RuntimeError("Rhino returned a missing or transformed texture mapping; scale cannot be verified.")
     if actual.MappingType != expected.MappingType:
         raise RuntimeError("Rhino retained a different texture projection than requested.")
@@ -186,9 +191,17 @@ def assign_object(oid, material_index, assignment):
     mult = float(assignment.get("scale_multiplier", 1))
     mapping = mapping_for(obj, float(f["swatch_width_in"]) * mult,
                           float(f["swatch_height_in"]) * mult)
-    rs.ObjectMaterialSource(oid, 1)
-    rs.ObjectMaterialIndex(oid, material_index)
-    if rs.ObjectMaterialSource(oid) != 1 or rs.ObjectMaterialIndex(oid) != material_index:
+    attr = obj.Attributes.Duplicate()
+    attr.MaterialSource = Rhino.DocObjects.ObjectMaterialSource.MaterialFromObject
+    attr.MaterialIndex = material_index
+    if not sc.doc.Objects.ModifyAttributes(oid, attr, True):
+        obj.Attributes.MaterialSource = Rhino.DocObjects.ObjectMaterialSource.MaterialFromObject
+        obj.Attributes.MaterialIndex = material_index
+        obj.CommitChanges()
+    obj = sc.doc.Objects.FindId(oid)
+    if (obj is None or
+            int(obj.Attributes.MaterialSource) != 1 or
+            obj.Attributes.MaterialIndex != material_index):
         raise RuntimeError("Rhino did not retain the requested object material.")
     if not sc.doc.Objects.ModifyTextureMapping(oid, 1, mapping):
         raise RuntimeError("Rhino could not apply the requested texture mapping.")
@@ -343,13 +356,28 @@ def main():
                            "the render was stopped to avoid a wrong result.")
 
     view = {"front": "_Front", "top": "_Top"}.get(CAMERA, "_Perspective")
-    if rs.Command("-_SetCurrentView _World %s _Enter" % view, False) is False:
+    if rs.Command("-_SetCurrentView _World %s" % view, False) is False:
         raise RuntimeError("Could not set the requested camera.")
     rs.ZoomExtents()
     settings = sc.doc.RenderSettings
     settings.UseViewportSize = False
     settings.ImageSize = System.Drawing.Size(WIDTH, HEIGHT)
     sc.doc.RenderSettings = settings
+    try:
+        if hasattr(vray, "SetRenderOutputSize"):
+            vray.SetRenderOutputSize(WIDTH, HEIGHT)
+        scene_out = vray.Scene["/SettingsOutput"] if hasattr(vray, "Scene") else None
+        if scene_out is not None:
+            for k, val in (("img_width", WIDTH), ("img_height", HEIGHT), ("rgn_width", WIDTH), ("rgn_height", HEIGHT)):
+                try:
+                    setattr(scene_out, k, val)
+                except Exception:
+                    try:
+                        scene_out[k] = val
+                    except Exception:
+                        pass
+    except Exception:
+        pass
     out = os.path.join(OUT_DIR, "render.png")
     if os.path.exists(out):
         os.remove(out)
