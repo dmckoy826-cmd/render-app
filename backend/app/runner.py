@@ -88,12 +88,40 @@ def pick_runner() -> str:
     return "mock"
 
 
+def _hydrate_batch_finishes(db: Session, batch: dict) -> dict:
+    from .routers.finishes import finish_out
+    out = dict(batch)
+
+    def hydrate_item(item: dict) -> dict:
+        d = dict(item)
+        fid = d.get("finish_id")
+        if fid is not None and not d.get("finish"):
+            f = db.get(Finish, int(fid))
+            if f is not None:
+                d["finish"] = {**finish_out(f), "file_url": f"/media/{f.storage_path}"}
+        return d
+
+    if isinstance(out.get("base_assignments"), list):
+        out["base_assignments"] = [hydrate_item(x) for x in out["base_assignments"]]
+    if isinstance(out.get("variations"), list):
+        hydrated_vars = []
+        for v in out["variations"]:
+            vd = dict(v)
+            if isinstance(vd.get("overrides"), list):
+                vd["overrides"] = [hydrate_item(x) for x in vd["overrides"]]
+            hydrated_vars.append(vd)
+        out["variations"] = hydrated_vars
+    return out
+
+
 def create_job(db: Session, kind: str, model_id: int, settings: dict | None = None,
                selected_runner: str | None = None) -> Job:
     which = selected_runner or pick_runner()
     settings = dict(settings or {})
     if kind == "render" and which == "agent":
         settings["_assignment_snapshot"] = agent_assignment_snapshot(db, model_id)
+        if isinstance(settings.get("batch"), dict):
+            settings["batch"] = _hydrate_batch_finishes(db, settings["batch"])
     job = Job(kind=kind, model_id=model_id, status="queued", runner=which,
               settings=settings,
               stage="Queued" if which == "mock" else "Waiting for Rhino worker")

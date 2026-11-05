@@ -31,7 +31,50 @@ QUALITY = os.environ.get("FF_QUALITY", "current")
 CAMERA = os.environ.get("FF_CAMERA", "iso")
 CAMERA_POSE = os.environ.get("FF_CAMERA_POSE", "")
 NAMED_VIEW = os.environ.get("FF_NAMED_VIEW", "")
+KEEP_FILE_VIEW = os.environ.get("FF_KEEP_FILE_VIEW", "") == "1"
+USE_FILE_VRAY = os.environ.get("FF_USE_FILE_VRAY", "") == "1"
+BATCH_FILE = os.environ.get("FF_BATCH", "")
+JOB_ID = os.environ.get("FF_JOB_ID", "")
 API = os.environ.get("FF_API", "http://localhost:8000").rstrip("/")
+
+
+def open_or_import_model(path):
+    if path.lower().endswith(".3dm"):
+        try:
+            sc.doc.Modified = False
+        except Exception:
+            pass
+        ok = rs.Command('-_Open "%s" _Enter' % path, False)
+        if ok is False:
+            ok = rs.Command('-_Import "%s" _Enter' % path, False)
+        return ok
+    return rs.Command('-_Import "%s" _Enter' % path, False)
+
+
+def report_progress(pct, stage):
+    if not JOB_ID:
+        return
+    try:
+        req = System.Net.WebRequest.Create("%s/api/agent/jobs/%s/progress" % (API, JOB_ID))
+        req.Method = "POST"
+        req.ContentType = "application/json"
+        req.Timeout = 5000
+        body = System.Text.Encoding.UTF8.GetBytes(json.dumps({"progress": int(pct), "stage": str(stage)}))
+        req.ContentLength = body.Length
+        stream = req.GetRequestStream()
+        stream.Write(body, 0, body.Length)
+        stream.Close()
+        resp = req.GetResponse()
+        resp.Close()
+    except Exception:
+        pass
+
+
+def sanitize_filename(name):
+    leaf = str(name or "render").split("::")[-1].strip()
+    bad = '<>:"/\\|?*'
+    cleaned = "".join("_" if c in bad or ord(c) < 32 else c for c in leaf).strip(" .")
+    return cleaned or "unnamed"
 
 
 def current_renderer():
@@ -277,6 +320,329 @@ def edit_definition(definition, wanted, materials):
     """
     if definition.IsLinkedType or definition.IsReference or definition.IsTenuous:
         raise RuntimeError("Linked or reference block '%s' cannot be edited safely; embed it first." % definition.Name)
+def mapping_for_relaxed(obj, sw_w, sw_h):
+    inches_per_unit = Rhino.RhinoMath.UnitScale(sc.doc.ModelUnitSystem, Rhino.UnitSystem.Inches)
+    if inches_per_unit <= 0:
+        inches_per_unit = 1.0
+    w, h = sw_w / inches_per_unit, sw_h / inches_per_unit
+    interval = Rhino.Geometry.Interval
+    plane = planar_mapping(obj.Geometry)
+    if plane is not None:
+        return Rhino.Render.TextureMapping.CreatePlaneMapping(
+            plane, interval(0, w), interval(0, h), interval(0, max(w, h)))
+    return Rhino.Render.TextureMapping.CreateBoxMapping(
+        Rhino.Geometry.Plane.WorldXY, interval(0, w), interval(0, h), interval(0, max(w, h)), True)
+
+
+def apply_part_layer_finish(layer_name, assignment, mat_info, mapped_ids):
+    """Apply finish + scale to a part layer and any renderable objects on it."""
+    material_index = mat_info["index"] if isinstance(mat_info, dict) else mat_info
+    render_mat = mat_info.get("render_material") if isinstance(mat_info, dict) else None
+    f = assignment["finish"]
+    mult = float(assignment.get("scale_multiplier", 1))
+    sw_w = float(f["swatch_width_in"]) * mult
+    sw_h = float(f["swatch_height_in"]) * mult
+    scale_token = (round(sw_w, 4), round(sw_h, 4))
+
+    target_layer_indices = set()
+    for layer in sc.doc.Layers:
+        if layer.IsDeleted:
+            continue
+        full = layer.FullPath or layer.Name or ""
+        short = layer.Name or ""
+        if full == layer_name or short == layer_name or full.endswith("::" + layer_name):
+            target_layer_indices.add(layer.Index)
+            try:
+                layer.RenderMaterialIndex = material_index
+                if render_mat is not None:
+                    layer.RenderMaterial = render_mat
+                sc.doc.Layers.Modify(layer, layer.Index, True)
+            except Exception:
+                pass
+
+    def update_obj(obj):
+        if obj is None or isinstance(obj, Rhino.DocObjects.InstanceObject):
+            return
+        if obj.Attributes.LayerIndex not in target_layer_indices:
+            return
+        info = identity(obj, None)
+        if not info or not info.get("renderable"):
+            return
+        try:
+            attr = obj.Attributes.Duplicate()
+            attr.MaterialSource = Rhino.DocObjects.ObjectMaterialSource.MaterialFromObject
+            attr.MaterialIndex = material_index
+            if render_mat is not None:
+                try:
+                    attr.RenderMaterial = render_mat
+                except Exception:
+                    pass
+            sc.doc.Objects.ModifyAttributes(obj, attr, True)
+        except Exception:
+            pass
+        oid_key = str(obj.Id)
+        if mapped_ids.get(oid_key) != scale_token:
+            try:
+                mapping = mapping_for_relaxed(obj, sw_w, sw_h)
+                if mapping is not None:
+                    sc.doc.Objects.ModifyTextureMapping(obj.Id, 1, mapping)
+                    mapped_ids[oid_key] = scale_token
+            except Exception:
+                pass
+
+    enum_settings = Rhino.DocObjects.ObjectEnumeratorSettings()
+    enum_settings.NormalObjects = True
+    enum_settings.HiddenObjects = True
+    enum_settings.LockedObjects = True
+    for obj in sc.doc.Objects.GetObjectList(enum_settings) or []:
+        update_obj(obj)
+    for d in sc.doc.InstanceDefinitions:
+        if d.IsDeleted:
+            continue
+        for obj in d.GetObjects() or []:
+            update_obj(obj)
+
+
+def isolate_sku_layer(target_sku, all_sku_layers):
+    """Turn ON target_sku (and its ancestor/child layers) and turn OFF other SKU layers."""
+    other_skus = set(all_sku_layers) - set([target_sku])
+
+    def is_under(layer_path, sku_name):
+        return (layer_path == sku_name or
+                layer_path.startswith(sku_name + "::") or
+                sku_name.startswith(layer_path + "::"))
+
+    other_indices = set()
+    target_indices = set()
+    for layer in sc.doc.Layers:
+        if layer.IsDeleted:
+            continue
+        full = layer.FullPath or layer.Name or ""
+        short = layer.Name or ""
+        if full == target_sku or short == target_sku or is_under(full, target_sku):
+            target_indices.add(layer.Index)
+            try:
+                layer.IsVisible = True
+                if hasattr(layer, "SetPersistentVisibility"):
+                    layer.SetPersistentVisibility(True)
+                sc.doc.Layers.Modify(layer, layer.Index, True)
+            except Exception:
+                pass
+        elif any(full == o or short == o or full.startswith(o + "::") for o in other_skus):
+            other_indices.add(layer.Index)
+            try:
+                layer.IsVisible = False
+                if hasattr(layer, "SetPersistentVisibility"):
+                    layer.SetPersistentVisibility(False)
+                sc.doc.Layers.Modify(layer, layer.Index, True)
+            except Exception:
+                pass
+        else:
+            # Part layers and light/environment layers stay visible
+            try:
+                if not layer.IsVisible:
+                    layer.IsVisible = True
+                    sc.doc.Layers.Modify(layer, layer.Index, True)
+            except Exception:
+                pass
+
+    enum_settings = Rhino.DocObjects.ObjectEnumeratorSettings()
+    enum_settings.NormalObjects = True
+    enum_settings.HiddenObjects = True
+    enum_settings.LockedObjects = False
+    for obj in sc.doc.Objects.GetObjectList(enum_settings) or []:
+        if obj is None:
+            continue
+        if obj.ObjectType == Rhino.DocObjects.ObjectType.Light:
+            continue
+        lidx = obj.Attributes.LayerIndex
+        if lidx in target_indices:
+            if obj.IsHidden:
+                sc.doc.Objects.Show(obj.Id, True)
+        elif lidx in other_indices:
+            if not obj.IsHidden:
+                sc.doc.Objects.Hide(obj.Id, True)
+    sc.doc.Views.Redraw()
+
+
+def configure_camera_and_output(vray, out_dir, out_filename):
+    active_view = sc.doc.Views.ActiveView
+    if active_view is None:
+        views = sc.doc.Views.GetViewList(True, False)
+        active_view = views[0] if views else None
+    if active_view is None:
+        raise RuntimeError("Could not find an active Rhino viewport for rendering.")
+    sc.doc.Views.ActiveView = active_view
+    vp = active_view.ActiveViewport
+    applied_custom_view = False
+    if NAMED_VIEW:
+        try:
+            nv_idx = sc.doc.NamedViews.FindByName(NAMED_VIEW)
+            if nv_idx >= 0 and sc.doc.NamedViews.Restore(nv_idx, vp):
+                applied_custom_view = True
+            else:
+                raise RuntimeError("Named view '%s' was not found in the Rhino document." % NAMED_VIEW)
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            raise RuntimeError("Could not restore Rhino named view '%s': %s" % (NAMED_VIEW, exc))
+    elif CAMERA_POSE:
+        try:
+            pose = json.loads(CAMERA_POSE)
+            inches_per_unit = Rhino.RhinoMath.UnitScale(sc.doc.ModelUnitSystem, Rhino.UnitSystem.Inches)
+            scale_to_doc = (1.0 / inches_per_unit) if inches_per_unit > 0 else 1.0
+            eye = [float(v) * scale_to_doc for v in pose["eye"]]
+            target = [float(v) * scale_to_doc for v in pose["target"]]
+            up = [float(v) for v in pose.get("up", [0.0, 0.0, 1.0])]
+            vp.SetProjection(Rhino.Display.DefinedViewportProjection.Perspective, "Perspective", False)
+            vp.SetCameraLocations(
+                Rhino.Geometry.Point3d(target[0], target[1], target[2]),
+                Rhino.Geometry.Point3d(eye[0], eye[1], eye[2]),
+            )
+            vp.CameraUp = Rhino.Geometry.Vector3d(up[0], up[1], up[2])
+            applied_custom_view = True
+        except Exception as exc:
+            raise RuntimeError("Could not apply custom 3D viewer camera: %s" % exc)
+    elif KEEP_FILE_VIEW:
+        applied_custom_view = True
+    if not applied_custom_view:
+        proj_map = {
+            "front": (Rhino.Display.DefinedViewportProjection.Front, "Front"),
+            "top": (Rhino.Display.DefinedViewportProjection.Top, "Top"),
+        }
+        proj, view_name = proj_map.get(CAMERA, (Rhino.Display.DefinedViewportProjection.Perspective, "Perspective"))
+        vp.SetProjection(proj, view_name, True)
+        vp.ZoomExtents()
+    active_view.Redraw()
+
+    if not USE_FILE_VRAY:
+        settings = sc.doc.RenderSettings
+        settings.UseViewportSize = False
+        settings.ImageSize = System.Drawing.Size(WIDTH, HEIGHT)
+        sc.doc.RenderSettings = settings
+    try:
+        if not USE_FILE_VRAY and hasattr(vray, "SetRenderOutputSize"):
+            vray.SetRenderOutputSize(WIDTH, HEIGHT)
+        scene_out = vray.Scene["/SettingsOutput"] if hasattr(vray, "Scene") else None
+        if scene_out is not None:
+            props = [("img_dir", out_dir), ("img_file", out_filename), ("save_image", True)]
+            if not USE_FILE_VRAY:
+                props = [("img_width", WIDTH), ("img_height", HEIGHT),
+                         ("rgn_width", WIDTH), ("rgn_height", HEIGHT)] + props
+            for k, val in props:
+                try:
+                    setattr(scene_out, k, val)
+                except Exception:
+                    try:
+                        scene_out[k] = val
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+
+def run_batch(batch_cfg, renderer, vray):
+    import shutil
+    output_dir = os.path.abspath(batch_cfg.get("output_dir") or OUT_DIR)
+    sku_layers = batch_cfg.get("sku_layers") or []
+    base_assignments = batch_cfg.get("base_assignments") or []
+    variations = batch_cfg.get("variations") or []
+    if not sku_layers:
+        raise RuntimeError("Batch render requires at least one SKU layer.")
+    if not variations:
+        raise RuntimeError("Batch render requires at least one finish variation in the queue.")
+    if not os.path.isdir(output_dir):
+        os.makedirs(output_dir)
+
+    mats_by_token = {}
+    mapped_ids = {}
+
+    def get_mat(assignment):
+        f = assignment.get("finish") or {}
+        if f.get("id") is None:
+            raise RuntimeError("Batch assignment is missing finish details.")
+        token = (f["id"], float(assignment.get("scale_multiplier", 1)))
+        if token not in mats_by_token:
+            mats_by_token[token] = make_material(assignment)
+        return mats_by_token[token]
+
+    # Pre-create all materials once
+    for a in base_assignments:
+        if a.get("finish"):
+            get_mat(a)
+    for var in variations:
+        for ov in var.get("overrides") or []:
+            if ov.get("finish"):
+                get_mat(ov)
+
+    # Apply base part-layer finishes
+    for a in base_assignments:
+        if a.get("finish") and a.get("target_name"):
+            apply_part_layer_finish(a["target_name"], a, get_mat(a), mapped_ids)
+
+    total_renders = len(sku_layers) * len(variations)
+    done_count = 0
+    saved_files = []
+    last_png = None
+
+    for sku_i, sku_layer in enumerate(sku_layers):
+        isolate_sku_layer(sku_layer, sku_layers)
+        sku_folder_name = sanitize_filename(sku_layer)
+        sku_dir = os.path.join(output_dir, sku_folder_name)
+        if not os.path.isdir(sku_dir):
+            os.makedirs(sku_dir)
+
+        for var_i, var in enumerate(variations):
+            pct = 10 + int(80.0 * done_count / max(1, total_renders))
+            label = var.get("label") or ("Render_%d" % (var_i + 1))
+            report_progress(
+                pct,
+                "SKU %d/%d (%s) · Finish %d/%d (%s)" % (
+                    sku_i + 1, len(sku_layers), sku_folder_name,
+                    var_i + 1, len(variations), label,
+                ),
+            )
+            for ov in var.get("overrides") or []:
+                if ov.get("finish") and ov.get("target_name"):
+                    apply_part_layer_finish(ov["target_name"], ov, get_mat(ov), mapped_ids)
+            sc.doc.Views.Redraw()
+
+            png_name = sanitize_filename(label) + ".png"
+            dest_png = os.path.join(sku_dir, png_name)
+            if os.path.exists(dest_png):
+                os.remove(dest_png)
+            configure_camera_and_output(vray, sku_dir, png_name)
+            vray.Render(0, 0, -1)
+            if not os.path.isfile(dest_png) or os.path.getsize(dest_png) == 0:
+                rs.Command('-_SaveRenderWindowAs "%s" _Enter' % dest_png, False)
+            if not os.path.isfile(dest_png) or os.path.getsize(dest_png) == 0:
+                raise RuntimeError("V-Ray did not save %s for SKU '%s'." % (png_name, sku_layer))
+            saved_files.append(dest_png)
+            last_png = dest_png
+            done_count += 1
+
+    out = os.path.join(OUT_DIR, "render.png")
+    shutil.copyfile(last_png, out)
+    image = System.Drawing.Image.FromFile(out)
+    try:
+        actual_w, actual_h = image.Width, image.Height
+    finally:
+        image.Dispose()
+    manifest = {
+        "protocol": 1,
+        "engine": "V-Ray",
+        "renderer": renderer,
+        "image": "render.png",
+        "width": actual_w,
+        "height": actual_h,
+        "quality": "current V-Ray settings",
+        "batch": True,
+        "output_dir": output_dir,
+        "saved_files": saved_files,
+    }
+    with open(os.path.join(OUT_DIR, "manifest.json"), "w") as fh:
+        json.dump(manifest, fh)
+    print("BATCH_RENDER_OK %d files in %s" % (len(saved_files), output_dir))
     expected = {}
     for obj in definition.GetObjects() or []:
         if obj.IsHidden or obj.IsLocked:
@@ -355,9 +721,18 @@ def main():
     if structure.get("target_schema") != SCHEMA:
         raise RuntimeError("This model needs a fresh analysis by the updated Rhino worker before rendering.")
     rs.EnableRedraw(False)
-    ok = rs.Command('-_Import "%s" _Enter' % MODEL, False)
+    ok = open_or_import_model(MODEL)
     rs.EnableRedraw(True)
-    if ok is False or not rs.AllObjects():
+    if ok is False:
+        raise RuntimeError("Rhino could not open/import %s." % MODEL)
+    if BATCH_FILE and os.path.isfile(BATCH_FILE):
+        with open(BATCH_FILE) as bfh:
+            batch_cfg = json.load(bfh)
+        renderer = ensure_vray()
+        vray = vray_wrapper()
+        run_batch(batch_cfg, renderer, vray)
+        return
+    if not rs.AllObjects():
         raise RuntimeError("Rhino could not import %s." % MODEL)
     scene = scan_document(include_geometry=False)
     if set(p["id"] for p in structure.get("parts", [])) != set(scene.parts):
@@ -407,75 +782,10 @@ def main():
         raise RuntimeError("The geometry or block structure changed during material assignment; "
                            "the render was stopped to avoid a wrong result.")
 
-    active_view = sc.doc.Views.ActiveView
-    if active_view is None:
-        views = sc.doc.Views.GetViewList(True, False)
-        active_view = views[0] if views else None
-    if active_view is None:
-        raise RuntimeError("Could not find an active Rhino viewport for rendering.")
-    sc.doc.Views.ActiveView = active_view
-    vp = active_view.ActiveViewport
-    applied_custom_view = False
-    if NAMED_VIEW:
-        try:
-            nv_idx = sc.doc.NamedViews.FindByName(NAMED_VIEW)
-            if nv_idx >= 0 and sc.doc.NamedViews.Restore(nv_idx, vp):
-                applied_custom_view = True
-            else:
-                raise RuntimeError("Named view '%s' was not found in the Rhino document." % NAMED_VIEW)
-        except RuntimeError:
-            raise
-        except Exception as exc:
-            raise RuntimeError("Could not restore Rhino named view '%s': %s" % (NAMED_VIEW, exc))
-    elif CAMERA_POSE:
-        try:
-            pose = json.loads(CAMERA_POSE)
-            inches_per_unit = Rhino.RhinoMath.UnitScale(sc.doc.ModelUnitSystem, Rhino.UnitSystem.Inches)
-            scale_to_doc = (1.0 / inches_per_unit) if inches_per_unit > 0 else 1.0
-            eye = [float(v) * scale_to_doc for v in pose["eye"]]
-            target = [float(v) * scale_to_doc for v in pose["target"]]
-            up = [float(v) for v in pose.get("up", [0.0, 0.0, 1.0])]
-            vp.SetProjection(Rhino.Display.DefinedViewportProjection.Perspective, "Perspective", False)
-            vp.SetCameraLocations(
-                Rhino.Geometry.Point3d(target[0], target[1], target[2]),
-                Rhino.Geometry.Point3d(eye[0], eye[1], eye[2]),
-            )
-            vp.CameraUp = Rhino.Geometry.Vector3d(up[0], up[1], up[2])
-            applied_custom_view = True
-        except Exception as exc:
-            raise RuntimeError("Could not apply custom 3D viewer camera: %s" % exc)
-    if not applied_custom_view:
-        proj_map = {
-            "front": (Rhino.Display.DefinedViewportProjection.Front, "Front"),
-            "top": (Rhino.Display.DefinedViewportProjection.Top, "Top"),
-        }
-        proj, view_name = proj_map.get(CAMERA, (Rhino.Display.DefinedViewportProjection.Perspective, "Perspective"))
-        vp.SetProjection(proj, view_name, True)
-        vp.ZoomExtents()
-    active_view.Redraw()
-    settings = sc.doc.RenderSettings
-    settings.UseViewportSize = False
-    settings.ImageSize = System.Drawing.Size(WIDTH, HEIGHT)
-    sc.doc.RenderSettings = settings
     out = os.path.join(OUT_DIR, "render.png")
     if os.path.exists(out):
         os.remove(out)
-    try:
-        if hasattr(vray, "SetRenderOutputSize"):
-            vray.SetRenderOutputSize(WIDTH, HEIGHT)
-        scene_out = vray.Scene["/SettingsOutput"] if hasattr(vray, "Scene") else None
-        if scene_out is not None:
-            for k, val in (("img_width", WIDTH), ("img_height", HEIGHT), ("rgn_width", WIDTH), ("rgn_height", HEIGHT),
-                           ("img_dir", OUT_DIR), ("img_file", "render.png"), ("save_image", True)):
-                try:
-                    setattr(scene_out, k, val)
-                except Exception:
-                    try:
-                        scene_out[k] = val
-                    except Exception:
-                        pass
-    except Exception:
-        pass
+    configure_camera_and_output(vray, OUT_DIR, "render.png")
     # Chaos documents timeout=-1 as a synchronous V-Ray production render.
     vray.Render(0, 0, -1)
     if not os.path.isfile(out) or os.path.getsize(out) == 0:
@@ -484,14 +794,16 @@ def main():
         raise RuntimeError("V-Ray did not save a render image; no viewport fallback is used.")
     image = System.Drawing.Image.FromFile(out)
     try:
-        if image.Width != WIDTH or image.Height != HEIGHT:
+        actual_w, actual_h = image.Width, image.Height
+        if not USE_FILE_VRAY and (actual_w != WIDTH or actual_h != HEIGHT):
             raise RuntimeError("V-Ray returned %dx%d, expected %dx%d." %
-                               (image.Width, image.Height, WIDTH, HEIGHT))
+                               (actual_w, actual_h, WIDTH, HEIGHT))
     finally:
         image.Dispose()
     manifest = {"protocol": 1, "engine": "V-Ray", "renderer": renderer,
-                "image": "render.png", "width": WIDTH, "height": HEIGHT,
-                "quality": "current V-Ray settings"}
+                "image": "render.png", "width": actual_w, "height": actual_h,
+                "quality": "current V-Ray settings",
+                "use_file_vray_settings": USE_FILE_VRAY}
     with open(os.path.join(OUT_DIR, "manifest.json"), "w") as fh:
         json.dump(manifest, fh)
     print("RENDER_OK %s" % out)

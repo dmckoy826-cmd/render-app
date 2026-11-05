@@ -22,12 +22,25 @@ OUT_GEOMETRY = os.environ["FF_OUT_GEOMETRY"]
 OUT_PNG = os.environ.get("FF_OUT_PNG", "")
 
 
+def open_or_import_model(path):
+    if path.lower().endswith(".3dm"):
+        try:
+            sc.doc.Modified = False
+        except Exception:
+            pass
+        ok = rs.Command('-_Open "%s" _Enter' % path, False)
+        if ok is False:
+            ok = rs.Command('-_Import "%s" _Enter' % path, False)
+        return ok
+    return rs.Command('-_Import "%s" _Enter' % path, False)
+
+
 def main():
     rs.EnableRedraw(False)
-    ok = rs.Command('-_Import "%s" _Enter' % MODEL, False)
+    ok = open_or_import_model(MODEL)
     rs.EnableRedraw(True)
-    if ok is False or not rs.AllObjects():
-        raise RuntimeError("Rhino could not import: %s" % MODEL)
+    if ok is False:
+        raise RuntimeError("Rhino could not open/import: %s" % MODEL)
     scene = scan_document(include_geometry=True)
     structure = scene.structure(os.path.basename(MODEL))
     try:

@@ -42,6 +42,7 @@ class SceneBuilder(object):
         self.order = []
         self.blocks = {}
         self.layers = {}
+        self.sku_layers = {}
         self.occurrences = []
         self.unsupported = []
         self.extents = None
@@ -58,6 +59,23 @@ class SceneBuilder(object):
         block = self.blocks.setdefault(name, {"name": name, "instance_count": 0,
                                              "layers": set(), "part_ids": set()})
         block["instance_count"] += 1
+
+    def add_sku_layer(self, name, color="#8d929a", block_name=None, part_layer=None):
+        if not name:
+            return
+        sku = self.sku_layers.setdefault(name, {
+            "name": name,
+            "color": color,
+            "object_count": 0,
+            "blocks": set(),
+            "part_layers": set(),
+        })
+        if block_name is not None:
+            sku["object_count"] += 1
+            if block_name:
+                sku["blocks"].add(block_name)
+        if part_layer:
+            sku["part_layers"].add(part_layer)
 
     def add_unsupported(self, layer, ancestors, kind):
         self.unsupported.append({"layer": layer, "ancestors": list(ancestors), "kind": kind})
@@ -131,11 +149,17 @@ class SceneBuilder(object):
         blocks = [{"name": d["name"], "instance_count": d["instance_count"],
                    "layers": sorted(d["layers"]), "part_ids": sorted(d["part_ids"])}
                   for _, d in sorted(self.blocks.items())]
-        return {"units": "inches", "source_file": source_file,
-                "analyzer": "rhino8-worker 2.0", "target_schema": SCHEMA,
-                "extents": self.extents, "layers": layers, "blocks": blocks, "parts": parts,
-                "geometry_status": "partial" if self.partial else "complete",
-                "geometry_warnings": list(self.warnings)}
+        sku_layers = [{"name": d["name"], "color": d["color"], "object_count": d["object_count"],
+                       "blocks": sorted(d["blocks"]), "part_layers": sorted(d["part_layers"])}
+                      for _, d in sorted(self.sku_layers.items()) if d["part_layers"] or d["blocks"]]
+        out = {"units": "inches", "source_file": source_file,
+               "analyzer": "rhino8-worker 2.0", "target_schema": SCHEMA,
+               "extents": self.extents, "layers": layers, "blocks": blocks, "parts": parts,
+               "geometry_status": "partial" if self.partial else "complete",
+               "geometry_warnings": list(self.warnings)}
+        if sku_layers:
+            out["sku_layers"] = sku_layers
+        return out
 
     def geometry(self):
         return {"version": 1, "units": "inches", "parts": [

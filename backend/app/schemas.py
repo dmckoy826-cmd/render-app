@@ -54,6 +54,9 @@ class RenderSettings(BaseModel):
     camera: str = Field(default="iso", pattern="^(iso|front|top)$")
     camera_pose: Optional[dict] = None
     named_view: Optional[str] = None
+    keep_file_view: bool = False
+    use_file_vray_settings: bool = False
+    batch: Optional[dict] = None
 
 
 class RenderJobIn(BaseModel):

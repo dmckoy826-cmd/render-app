@@ -99,7 +99,8 @@ def png_size(path: Path) -> tuple[int, int]:
     return struct.unpack(">II", header[16:24])
 
 
-def validate_render_output(out_dir: Path, error: Path, width: int, height: int) -> tuple[Path, dict]:
+def validate_render_output(out_dir: Path, error: Path, width: int, height: int,
+                           flexible_size: bool = False) -> tuple[Path, dict]:
     if error.exists():
         raise script_error(error, "Rhino render failed.")
     manifest_path = out_dir / "manifest.json"
@@ -116,10 +117,17 @@ def validate_render_output(out_dir: Path, error: Path, width: int, height: int) 
     if meta.get("image") != "render.png":
         raise RuntimeError("Render manifest does not name render.png.")
     image = out_dir / "render.png"
-    if not image.is_file() or png_size(image) != (width, height):
+    if not image.is_file():
         raise RuntimeError(f"Render image is missing or not the requested {width}x{height} size.")
-    if (meta.get("width"), meta.get("height")) != (width, height):
-        raise RuntimeError("Render manifest dimensions do not match the requested size.")
+    actual_size = png_size(image)
+    if flexible_size or meta.get("batch") is True or meta.get("use_file_vray_settings") is True:
+        if (meta.get("width"), meta.get("height")) != actual_size:
+            raise RuntimeError("Render manifest dimensions do not match the rendered image size.")
+    else:
+        if actual_size != (width, height):
+            raise RuntimeError(f"Render image is missing or not the requested {width}x{height} size.")
+        if (meta.get("width"), meta.get("height")) != (width, height):
+            raise RuntimeError("Render manifest dimensions do not match the requested size.")
     return image, meta
 
 
@@ -176,6 +184,10 @@ def do_render(job: dict, model: dict, settings: dict, assignments: list) -> None
         tex_dir.mkdir()
         error = td / "rhino_error.txt"
         width, height = int(settings.get("width", 1920)), int(settings.get("height", 1080))
+        batch_data = settings.get("batch")
+        batch_path = td / "batch.json"
+        if isinstance(batch_data, dict):
+            batch_path.write_text(json.dumps(batch_data), encoding="utf-8")
         progress(job["id"], 5, "Worker: preparing model and materials")
         console = run_rhino(HERE / "rhino_scripts" / "render_model.py", {
             "FF_MODEL": str(model_path), "FF_ASSIGNMENTS": str(assign_path),
@@ -186,12 +198,17 @@ def do_render(job: dict, model: dict, settings: dict, assignments: list) -> None
             "FF_CAMERA": str(settings.get("camera", "iso")),
             "FF_CAMERA_POSE": json.dumps(settings["camera_pose"]) if settings.get("camera_pose") else "",
             "FF_NAMED_VIEW": str(settings.get("named_view") or ""),
+            "FF_KEEP_FILE_VIEW": "1" if settings.get("keep_file_view") else "",
+            "FF_USE_FILE_VRAY": "1" if settings.get("use_file_vray_settings") else "",
+            "FF_BATCH": str(batch_path) if isinstance(batch_data, dict) else "",
+            "FF_JOB_ID": str(job["id"]),
             "FF_API": API,
-        })
+        }, timeout=14400 if isinstance(batch_data, dict) else 3600)
         if error.exists():
             raise script_error(error, "Rhino render failed.")
+        flexible = bool(settings.get("use_file_vray_settings") or isinstance(batch_data, dict))
         try:
-            image, meta = validate_render_output(out_dir, error, width, height)
+            image, meta = validate_render_output(out_dir, error, width, height, flexible_size=flexible)
         except RuntimeError as exc:
             raise RuntimeError(f"{exc} Rhino console: {console[-1200:]}") from exc
         progress(job["id"], 92, "Uploading verified render")

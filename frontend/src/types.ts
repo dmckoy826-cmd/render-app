@@ -59,6 +59,14 @@ export interface SavedCameraView {
   pose: CameraPose;
 }
 
+export interface SkuLayerInfo {
+  name: string;
+  color: string;
+  object_count: number;
+  blocks: string[];
+  part_layers: string[];
+}
+
 export interface Structure {
   units: string;
   source_file?: string;
@@ -68,6 +76,7 @@ export interface Structure {
   geometry_status?: "complete" | "partial";
   geometry_warnings?: string[];
   named_views?: string[];
+  sku_layers?: SkuLayerInfo[];
   extents: BBox;
   layers: LayerInfo[];
   blocks: BlockInfo[];

@@ -68,6 +68,7 @@ export default function ModelWorkspace() {
   const [saveOpen, setSaveOpen] = useState(false);
   const [presetName, setPresetName] = useState("");
   const [renderOpen, setRenderOpen] = useState(false);
+  const [renderMode, setRenderMode] = useState<"single" | "batch">("single");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [partSearch, setPartSearch] = useState("");
   const [partLimit, setPartLimit] = useState(100);
@@ -190,7 +191,11 @@ export default function ModelWorkspace() {
             className="rounded-lg border border-zinc-700 px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-800 disabled:opacity-40">
             Save preset
           </button>
-          <button onClick={() => setRenderOpen(true)} disabled={model.status !== "ready"}
+          <button onClick={() => { setRenderMode("batch"); setRenderOpen(true); }} disabled={model.status !== "ready"}
+            className="rounded-lg border border-amber-500/50 bg-amber-500/10 px-3 py-2 text-sm font-medium text-amber-300 hover:bg-amber-500/20 disabled:opacity-40">
+            Batch SKU Render
+          </button>
+          <button onClick={() => { setRenderMode("single"); setRenderOpen(true); }} disabled={model.status !== "ready"}
             className="rounded-lg bg-amber-500 px-4 py-2 text-sm font-medium text-zinc-950 hover:bg-amber-400 disabled:opacity-40">
             Render
           </button>
@@ -481,9 +486,13 @@ export default function ModelWorkspace() {
         </div>
       </Modal>
       <RenderDialog open={renderOpen} onClose={() => setRenderOpen(false)} modelId={modelId}
+        initialMode={renderMode}
         currentCameraPose={cameraPose}
         savedViews={savedViews}
         namedViews={model.structure?.named_views || []}
+        skuLayers={model.structure?.sku_layers || []}
+        partLayers={model.structure?.layers || []}
+        assignments={model.assignments || []}
         onDone={() => { refreshRenders(); setTab("renders"); }} />
     </div>
   );
