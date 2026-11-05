@@ -192,6 +192,15 @@ def apply_analysis(db: Session, model: ModelDoc, structure: dict,
         prev_rel = preview_rel
     model.preview_path = prev_rel
     model.status = "ready"
+    valid_targets = {
+        "layer": {l["name"] for l in structure.get("layers", []) if "name" in l},
+        "block": {b["name"] for b in structure.get("blocks", []) if "name" in b},
+        "part": {p["id"] if structure.get("target_schema") == "rhino-geometry-v1" else p["name"]
+                 for p in structure.get("parts", []) if "id" in p or "name" in p},
+    }
+    for row in db.query(Assignment).filter(Assignment.model_id == model.id).all():
+        if row.target_name not in valid_targets.get(row.target_kind, set()):
+            db.delete(row)
     db.commit()
     old_file = config.geometry_file_from_url(old_geometry)
     if old_file is not None and old_geometry != new_geometry:
