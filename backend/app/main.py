@@ -86,6 +86,29 @@ def pick_folder():
         return {"path": ""}
 
 
+@app.get("/api/system/pick-file")
+def pick_file():
+    import os
+    import subprocess
+    if os.name != "nt":
+        return {"path": ""}
+    ps_script = (
+        "Add-Type -AssemblyName System.Windows.Forms; "
+        "$f = New-Object System.Windows.Forms.OpenFileDialog; "
+        "$f.Title = 'Select CAD / Rhino Model'; "
+        "$f.Filter = 'CAD & 3D Models (*.3dm;*.dwg;*.dxf;*.step;*.stp;*.obj;*.skp)|*.3dm;*.dwg;*.dxf;*.step;*.stp;*.obj;*.skp|All Files (*.*)|*.*'; "
+        "if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $f.FileName }"
+    )
+    try:
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-Sta", "-Command", ps_script],
+            capture_output=True, text=True, timeout=120,
+        )
+        return {"path": (proc.stdout or "").strip()}
+    except Exception:
+        return {"path": ""}
+
+
 @app.get("/api/health")
 def health():
     return {"ok": True}

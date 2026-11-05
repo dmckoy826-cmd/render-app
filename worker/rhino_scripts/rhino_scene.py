@@ -14,8 +14,8 @@ import scriptcontext as sc
 from ff_common import SceneBuilder, part_key
 
 MAX_DEPTH = 32
-MAX_PARTS = 50000
-MAX_OCCURRENCES = 250000
+MAX_PARTS = 250000
+MAX_OCCURRENCES = 1000000
 
 
 def layer_of(obj):
