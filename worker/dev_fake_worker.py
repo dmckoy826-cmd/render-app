@@ -90,6 +90,8 @@ def demo_structure(name: str) -> dict:
         "units": "inches",
         "source_file": name,
         "analyzer": "dev-fake-worker (NOT real Rhino)",
+        "target_schema": "rhino-geometry-v1",
+        "geometry_status": "complete",
         "extents": {"min": [0, 0, 0], "max": [60, 24, 84]},
         "layers": [
             {"name": "LAM-CASE", "color": "#b5651d", "part_count": 1},
@@ -113,10 +115,40 @@ def build_structure(model_path: Path, name: str) -> dict:
             from app import dxfparse  # backend on sys.path
             s = dxfparse.parse(str(model_path))
             s["analyzer"] = "dev-fake-worker (dxf source — NOT real Rhino)"
+            s["target_schema"] = "rhino-geometry-v1"
+            s["geometry_status"] = "complete"
             return s
         except Exception as exc:
             log("dxfparse unavailable/failed:", exc)
     return demo_structure(name)
+
+
+def box_geometry(parts: list[dict]) -> dict:
+    """Build a valid rhino-geometry-v1 preview from part bounding boxes.
+
+    The real Rhino worker tessellates actual surfaces; this is only a synthetic
+    stand-in so the dev fake worker can exercise the full server pipeline.
+    """
+    geo_parts = []
+    for part in parts:
+        bbox = part.get("bbox") or {}
+        mn, mx = bbox.get("min"), bbox.get("max")
+        if not mn or not mx or len(mn) != 3 or len(mx) != 3:
+            continue
+        corners = [
+            [mn[0], mn[1], mn[2]], [mx[0], mn[1], mn[2]],
+            [mx[0], mx[1], mn[2]], [mn[0], mx[1], mn[2]],
+            [mn[0], mn[1], mx[2]], [mx[0], mn[1], mx[2]],
+            [mx[0], mx[1], mx[2]], [mn[0], mx[1], mx[2]],
+        ]
+        positions = [c for corner in corners for c in corner]
+        faces = [(0, 1, 2), (0, 2, 3), (4, 6, 5), (4, 7, 6),
+                 (0, 4, 5), (0, 5, 1), (1, 5, 6), (1, 6, 2),
+                 (2, 6, 7), (2, 7, 3), (3, 7, 4), (3, 4, 0)]
+        triangles = [i for face in faces for i in face]
+        geo_parts.append({"id": part["id"], "positions": positions,
+                          "triangles": triangles, "lines": []})
+    return {"version": 1, "units": "inches", "parts": geo_parts}
 
 
 # --------------------------------------------------------------------------- #
@@ -144,10 +176,14 @@ def do_analyze(job: dict, model: dict, td: Path) -> None:
     progress(job["id"], 70, "dev-fake: structure built")
     preview = td / "preview.png"
     make_png(preview, 480, 360, "preview")
-    with open(preview, "rb") as fh:
+    geometry = td / "geometry.json"
+    geometry.write_text(json.dumps(box_geometry(structure.get("parts", []))))
+    with open(preview, "rb") as pfh, open(geometry, "rb") as gfh:
         r = requests.post(f"{API}/api/agent/jobs/{job['id']}/complete",
                           data={"structure": json.dumps(structure)},
-                          files={"files": ("preview.png", fh, "image/png")}, timeout=60)
+                          files={"files": ("preview.png", pfh, "image/png"),
+                                 "geometry": ("geometry.json", gfh, "application/json")},
+                          timeout=60)
     r.raise_for_status()
 
 

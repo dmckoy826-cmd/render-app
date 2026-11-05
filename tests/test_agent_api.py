@@ -245,8 +245,32 @@ class AgentApiTests(unittest.TestCase):
         self.assertEqual(invalid.status_code, 400)
         misnamed = self.client.post("/api/finishes", files={"file": ("bad.jpg", png(), "image/jpeg")})
         self.assertEqual(misnamed.status_code, 400)
-        valid = self.client.post("/api/finishes", files={"file": ("good.png", png(), "image/png")})
+        valid = self.client.post("/api/finishes", files={"file": ("good.png", png(), "image/png")},
+                                 data={"swatch_width_in": "12", "swatch_height_in": "12"})
         self.assertEqual(valid.status_code, 200, valid.text)
+
+    def test_swatch_upload_requires_real_world_dimensions(self):
+        """A missing size must be rejected, not silently defaulted — a wrong size
+        silently mis-scales every texture that uses the swatch."""
+        missing = self.client.post("/api/finishes",
+                                   files={"file": ("nosize.png", png(), "image/png")})
+        self.assertEqual(missing.status_code, 400, missing.text)
+        self.assertIn("dimensions", missing.json()["detail"])
+
+        partial = self.client.post("/api/finishes", files={"file": ("half.png", png(), "image/png")},
+                                   data={"swatch_width_in": "48"})
+        self.assertEqual(partial.status_code, 400, partial.text)
+
+        zero = self.client.post("/api/finishes", files={"file": ("zero.png", png(), "image/png")},
+                                data={"swatch_width_in": "0", "swatch_height_in": "48"})
+        self.assertEqual(zero.status_code, 400, zero.text)
+
+        ok = self.client.post("/api/finishes", files={"file": ("ok.png", png(), "image/png")},
+                              data={"swatch_width_in": "48", "swatch_height_in": "96"})
+        self.assertEqual(ok.status_code, 200, ok.text)
+        body = ok.json()
+        self.assertEqual(body["swatch_width_in"], 48.0)
+        self.assertEqual(body["swatch_height_in"], 96.0)
 
     def test_automatch_distinguishes_same_layer_and_block_name(self):
         model_id, _ = self.job("analyze", status="done")

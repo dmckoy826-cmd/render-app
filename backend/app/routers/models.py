@@ -69,21 +69,59 @@ def job_out(j: Job, db: Session) -> dict:
 
 @router.post("")
 async def upload_model(file: UploadFile, name: str = Form(None), db: Session = Depends(get_db)):
+    import shutil
     orig = file.filename or "model.dwg"
     ext = ("." + orig.rsplit(".", 1)[-1].lower()) if "." in orig else ""
     if ext not in MODEL_EXT:
         raise HTTPException(400, f"unsupported file type '{ext}'. Accepted: {', '.join(sorted(MODEL_EXT))}")
-    data = await file.read()
-    if not data:
-        raise HTTPException(400, "empty file")
     stem = f"{uuid.uuid4().hex[:10]}_{_safe_name(orig)}"
     rel = f"models/{stem}"
-    (MEDIA_DIR / rel).write_bytes(data)
+    dest = MEDIA_DIR / rel
+    with open(dest, "wb") as out_fh:
+        shutil.copyfileobj(file.file, out_fh, length=1024 * 1024)
+    size_bytes = dest.stat().st_size
+    if size_bytes == 0:
+        dest.unlink(missing_ok=True)
+        raise HTTPException(400, "empty file")
 
     display = (name or "").strip() or re.sub(r"\.[^.]+$", "", orig)
     m = ModelDoc(name=display, original_name=orig, storage_path=rel,
                  content_type=file.content_type or "application/octet-stream",
-                 size_bytes=len(data), status="uploaded")
+                 size_bytes=size_bytes, status="uploaded")
+    db.add(m)
+    db.commit()
+    db.refresh(m)
+    job = runner.create_job(db, "analyze", m.id)
+    return {"model": model_out(m), "job": job_out(job, db)}
+
+
+@router.post("/from-path")
+def upload_model_from_local_path(body: dict, db: Session = Depends(get_db)):
+    import os
+    from pathlib import Path
+    import shutil
+    raw_path = str(body.get("path") or "").strip().strip('"')
+    if not raw_path or not os.path.isfile(raw_path):
+        raise HTTPException(400, f"Local file not found: {raw_path}")
+    src = Path(raw_path)
+    orig = src.name
+    ext = src.suffix.lower()
+    if ext not in MODEL_EXT:
+        raise HTTPException(400, f"unsupported file type '{ext}'. Accepted: {', '.join(sorted(MODEL_EXT))}")
+    size_bytes = src.stat().st_size
+    if size_bytes == 0:
+        raise HTTPException(400, "empty file")
+    stem = f"{uuid.uuid4().hex[:10]}_{_safe_name(orig)}"
+    rel = f"models/{stem}"
+    dest = MEDIA_DIR / rel
+    try:
+        os.link(src, dest)
+    except OSError:
+        shutil.copyfile(src, dest)
+    display = str(body.get("name") or "").strip() or re.sub(r"\.[^.]+$", "", orig)
+    m = ModelDoc(name=display, original_name=orig, storage_path=rel,
+                 content_type="application/octet-stream",
+                 size_bytes=size_bytes, status="uploaded")
     db.add(m)
     db.commit()
     db.refresh(m)

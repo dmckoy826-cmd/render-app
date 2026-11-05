@@ -3,23 +3,56 @@ import { Link, useParams } from "react-router-dom";
 import { api, fmtDate, toast } from "../api";
 import { usePoll } from "../hooks";
 import Viewer3D, { type ViewerItem } from "../components/Viewer3D";
-import FinishPicker from "../components/FinishPicker";
+import FinishPicker, { loadSavedScales, saveScalesList } from "../components/FinishPicker";
 import JobProgress, { StatusChip } from "../components/JobProgress";
 import RenderDialog from "../components/RenderDialog";
 import Modal from "../components/Modal";
-import type { Assignment, Finish, ModelDetail, Part, Preset, RenderResult, Suggestion } from "../types";
+import type { Assignment, CameraPose, Finish, ModelDetail, Part, Preset, RenderResult, SavedCameraView, Suggestion } from "../types";
 
 type Target = { kind: "layer" | "block" | "part"; name: string; label?: string };
 
-function AssignmentScale({ value, onSave }: { value: number; onSave: (n: number) => void }) {
+function AssignmentScale({
+  value, finish, onSave,
+}: {
+  value: number;
+  finish?: Finish | null;
+  onSave: (n: number) => void;
+}) {
   const [draft, setDraft] = useState(String(value));
   useEffect(() => setDraft(String(value)), [value]);
-  return <label className="flex items-center gap-1 text-[10px] text-zinc-500" title="Texture size multiplier: 2 makes the swatch twice as wide and tall">
-    scale ×<input type="number" min="0.01" step="0.1" value={draft} aria-label="Texture size multiplier"
-      onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
-      onBlur={() => { const n = Number(draft); if (!Number.isFinite(n) || n <= 0) setDraft(String(value)); else if (n !== value) onSave(n); }}
-      className="w-14 rounded border border-zinc-700 bg-zinc-950 px-1 py-1 text-xs text-zinc-300" />
-  </label>;
+  const effW = finish ? Math.round(finish.swatch_width_in * value * 100) / 100 : null;
+  const effH = finish ? Math.round(finish.swatch_height_in * value * 100) / 100 : null;
+  const quickSave = () => {
+    const list = loadSavedScales();
+    const label = effW && effH ? `${effW}×${effH}" (${value}×)` : `${value}×`;
+    const next = [...list.filter((s) => !(s.label === label && s.scale === value)), { label, scale: value, finishId: finish?.id }];
+    saveScalesList(next);
+    toast(`Saved scale "${label}"`);
+  };
+  return (
+    <span className="inline-flex items-center gap-1 text-[10px] text-zinc-500" title={effW && effH ? `Effective tile size: ${effW}×${effH}" (base ${finish?.swatch_width_in}×${finish?.swatch_height_in}")` : "Texture size multiplier"}>
+      <span>×</span>
+      <input
+        type="number"
+        min="0.01"
+        step="0.1"
+        value={draft}
+        aria-label="Texture size multiplier"
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
+        onBlur={() => {
+          const n = Number(draft);
+          if (!Number.isFinite(n) || n <= 0) setDraft(String(value));
+          else if (n !== value) onSave(n);
+        }}
+        className="w-12 rounded border border-zinc-700 bg-zinc-950 px-1 py-0.5 text-[11px] text-amber-300"
+      />
+      {effW && effH && <span className="hidden text-[10px] text-zinc-500 sm:inline">({effW}×{effH}&quot;)</span>}
+      <button type="button" onClick={quickSave} className="rounded px-1 py-0.5 text-[10px] text-zinc-500 hover:bg-zinc-800 hover:text-amber-300" title="Save this scale for quick reuse">
+        ★
+      </button>
+    </span>
+  );
 }
 
 export default function ModelWorkspace() {
@@ -35,9 +68,35 @@ export default function ModelWorkspace() {
   const [saveOpen, setSaveOpen] = useState(false);
   const [presetName, setPresetName] = useState("");
   const [renderOpen, setRenderOpen] = useState(false);
+  const [renderMode, setRenderMode] = useState<"single" | "batch">("single");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [partSearch, setPartSearch] = useState("");
   const [partLimit, setPartLimit] = useState(100);
+  const [cameraPose, setCameraPose] = useState<CameraPose | null>(null);
+  const viewsKey = `ff_saved_views_${modelId}`;
+  const [savedViews, setSavedViews] = useState<SavedCameraView[]>([]);
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(viewsKey);
+      setSavedViews(raw ? JSON.parse(raw) : []);
+    } catch {
+      setSavedViews([]);
+    }
+  }, [viewsKey]);
+
+  const handleSaveView = (name: string, pose: CameraPose) => {
+    const next = [...savedViews.filter((v) => v.name !== name), { name, pose }];
+    setSavedViews(next);
+    try { localStorage.setItem(viewsKey, JSON.stringify(next)); } catch { /* ignore */ }
+    toast(`Saved camera view "${name}"`);
+  };
+
+  const handleDeleteView = (name: string) => {
+    const next = savedViews.filter((v) => v.name !== name);
+    setSavedViews(next);
+    try { localStorage.setItem(viewsKey, JSON.stringify(next)); } catch { /* ignore */ }
+  };
 
   const assign = async (t: Target, finishId: number | null, scale = 1) => {
     try {
@@ -97,7 +156,7 @@ export default function ModelWorkspace() {
   if (!model) return <p className="p-10 text-sm text-zinc-500">Loading model…</p>;
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden">
       {/* header */}
       <header className="flex items-center gap-4 border-b border-zinc-800 px-6 py-4">
         <Link to="/models" className="rounded-lg border border-zinc-800 p-2 text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200">
@@ -132,7 +191,11 @@ export default function ModelWorkspace() {
             className="rounded-lg border border-zinc-700 px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-800 disabled:opacity-40">
             Save preset
           </button>
-          <button onClick={() => setRenderOpen(true)} disabled={model.status !== "ready"}
+          <button onClick={() => { setRenderMode("batch"); setRenderOpen(true); }} disabled={model.status !== "ready"}
+            className="rounded-lg border border-amber-500/50 bg-amber-500/10 px-3 py-2 text-sm font-medium text-amber-300 hover:bg-amber-500/20 disabled:opacity-40">
+            Batch SKU Render
+          </button>
+          <button onClick={() => { setRenderMode("single"); setRenderOpen(true); }} disabled={model.status !== "ready"}
             className="rounded-lg bg-amber-500 px-4 py-2 text-sm font-medium text-zinc-950 hover:bg-amber-400 disabled:opacity-40">
             Render
           </button>
@@ -176,13 +239,17 @@ export default function ModelWorkspace() {
           )}
         </div>
       ) : (
-        <div className="grid min-h-0 flex-1 grid-cols-1 xl:grid-cols-[1fr_420px]">
+        <div className="grid min-h-0 flex-1 grid-cols-1 grid-rows-[minmax(360px,1fr)_minmax(0,1fr)] overflow-hidden xl:grid-cols-[minmax(0,1fr)_420px] xl:grid-rows-1">
           {/* viewer */}
-          <div className="relative min-h-[420px] border-b border-zinc-800 bg-gradient-to-b from-zinc-900 to-zinc-950 xl:border-b-0 xl:border-r">
+          <div className="relative min-h-[360px] min-w-0 overflow-hidden border-b border-zinc-800 bg-gradient-to-b from-zinc-900 to-zinc-950 xl:border-b-0 xl:border-r">
             <Viewer3D items={stableItems} selected={selected} geometryUrl={model.structure?.geometry_url}
               partial={model.structure?.geometry_status === "partial"}
               simulatedGeometry={!model.structure?.analyzer?.startsWith("rhino") || /fake|stub/i.test(model.structure?.analyzer || "")}
-              onSelect={(pid) => setSelected(pid ? new Set([pid]) : new Set())} />
+              onSelect={(pid) => setSelected(pid ? new Set([pid]) : new Set())}
+              onCameraChange={setCameraPose}
+              savedViews={savedViews}
+              onSaveView={handleSaveView}
+              onDeleteView={handleDeleteView} />
             <div className="pointer-events-none absolute left-4 top-4 rounded-lg border border-zinc-800/80 bg-zinc-950/70 px-3 py-2 text-[11px] text-zinc-400 backdrop-blur">
               Drag to orbit · scroll to zoom · click a part to select
               <span className="ml-2 text-cyan-400">block targets affect shared definitions</span>
@@ -215,7 +282,11 @@ export default function ModelWorkspace() {
                         {p.matching_objects && p.matching_objects > 1 ? ` · ${p.matching_objects} indistinguishable objects share this target` : ""}
                         {p.renderable === false ? " · linework, not a renderable surface" : ""}
                       </p>
-                      <div className="mt-2 flex items-center gap-2">
+                      <div className="mt-2 flex flex-wrap items-center gap-2">
+                        {assigned?.finish && (
+                          <AssignmentScale value={assigned.scale_multiplier} finish={assigned.finish}
+                            onSave={(scale) => assign({ kind: "part", name: target }, assigned.finish_id, scale)} />
+                        )}
                         <button onClick={() => setPicker({ kind: "part", name: target, label: p.name })}
                           className="rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800">{assigned ? "Change override" : "Assign part override"}</button>
                         {assigned && <button onClick={() => assign({ kind: "part", name: target }, null)} className="text-xs text-zinc-500 hover:text-red-400">Clear override</button>}
@@ -238,7 +309,9 @@ export default function ModelWorkspace() {
                             {a?.finish ? (
                               <>
                                 <img src={a.finish.thumb_url} alt="" className="h-6 w-6 rounded object-cover" />
-                                <span className="max-w-[110px] truncate text-xs text-zinc-400">{a.finish.name}</span>
+                                <span className="max-w-[90px] truncate text-xs text-zinc-400">{a.finish.name}</span>
+                                <AssignmentScale value={a.scale_multiplier} finish={a.finish}
+                                  onSave={(scale) => assign({ kind: "layer", name: l.name }, a.finish_id, scale)} />
                                 <button onClick={() => assign({ kind: "layer", name: l.name }, null)}
                                   className="rounded p-1 text-zinc-600 hover:bg-zinc-800 hover:text-red-400" title="Clear">✕</button>
                               </>
@@ -269,10 +342,12 @@ export default function ModelWorkspace() {
                                 <span className="text-[11px] text-zinc-500">×{b.instance_count} instances</span>
                                 <span className="ml-auto rounded border border-cyan-700/40 bg-cyan-500/10 px-1.5 py-0.5 text-[10px] text-cyan-300">BlockEdit</span>
                               </div>
-                              <div className="mt-2 flex items-center gap-2">
+                              <div className="mt-2 flex flex-wrap items-center gap-2">
                                 {a?.finish ? (
                                   <><img src={a.finish.thumb_url} alt="" className="h-6 w-6 rounded object-cover" />
                                     <span className="text-xs text-zinc-400">{a.finish.name}</span>
+                                    <AssignmentScale value={a.scale_multiplier} finish={a.finish}
+                                      onSave={(scale) => assign({ kind: "block", name: b.name }, a.finish_id, scale)} />
                                     <button onClick={() => assign({ kind: "block", name: b.name }, null)} className="text-zinc-600 hover:text-red-400">✕</button></>
                                 ) : <span className="text-[11px] text-zinc-600">inherits parent / layer finishes</span>}
                                 <button onClick={() => setPicker({ kind: "block", name: b.name })}
@@ -348,8 +423,8 @@ export default function ModelWorkspace() {
                       </span>
                       <span className="min-w-0 flex-1 truncate text-sm text-zinc-200">{a.target_kind === "part" ? (model.structure?.parts.find((p) => partTarget(p) === a.target_name)?.name || `${a.target_name} (stale target)`) : a.target_name}</span>
                       {a.finish && <img src={a.finish.thumb_url} alt="" className="h-7 w-7 rounded object-cover" />}
-                      <span className="w-32 truncate text-xs text-zinc-400">{a.finish?.name}</span>
-                      <AssignmentScale value={a.scale_multiplier} onSave={(scale) => assign({ kind: a.target_kind, name: a.target_name }, a.finish_id, scale)} />
+                      <span className="w-28 truncate text-xs text-zinc-400">{a.finish?.name}</span>
+                      <AssignmentScale value={a.scale_multiplier} finish={a.finish} onSave={(scale) => assign({ kind: a.target_kind, name: a.target_name }, a.finish_id, scale)} />
                       <button onClick={() => setPicker({ kind: a.target_kind, name: a.target_name })}
                         className="rounded-lg border border-zinc-700 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800">Change</button>
                       <button onClick={() => assign({ kind: a.target_kind, name: a.target_name }, null)}
@@ -386,7 +461,9 @@ export default function ModelWorkspace() {
       {/* modals */}
       <FinishPicker open={!!picker} onClose={() => setPicker(null)}
         title={picker ? `Assign finish → ${picker.kind}: ${picker.label || (picker.kind === "part" ? model.structure?.parts.find((p) => partTarget(p) === picker.name)?.name : picker.name) || picker.name}` : ""}
-        onPick={(f: Finish) => picker && assign(picker, f.id, assignFor(picker)?.scale_multiplier || 1)} />
+        initialScale={picker ? assignFor(picker)?.scale_multiplier || 1 : 1}
+        initialFinishId={picker ? assignFor(picker)?.finish_id || null : null}
+        onPick={(f: Finish, scale: number) => picker && assign(picker, f.id, scale)} />
       <AutoMatchModal open={autoOpen} onClose={() => setAutoOpen(false)} modelId={modelId} onApplied={refresh} />
       <ApplyPresetModal open={applyOpen} onClose={() => setApplyOpen(false)} modelId={modelId} onApplied={refresh} />
       <Modal open={saveOpen} onClose={() => setSaveOpen(false)} title="Save mapping as preset">
@@ -409,6 +486,13 @@ export default function ModelWorkspace() {
         </div>
       </Modal>
       <RenderDialog open={renderOpen} onClose={() => setRenderOpen(false)} modelId={modelId}
+        initialMode={renderMode}
+        currentCameraPose={cameraPose}
+        savedViews={savedViews}
+        namedViews={model.structure?.named_views || []}
+        skuLayers={model.structure?.sku_layers || []}
+        partLayers={model.structure?.layers || []}
+        assignments={model.assignments || []}
         onDone={() => { refreshRenders(); setTab("renders"); }} />
     </div>
   );

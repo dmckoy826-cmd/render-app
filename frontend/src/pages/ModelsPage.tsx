@@ -39,21 +39,43 @@ export default function ModelsPage() {
     if (fileRef.current) fileRef.current.value = "";
   };
 
+  const onPickLocalFile = async () => {
+    setUploading(true);
+    try {
+      const picked = await api.get("/api/system/pick-file");
+      if (picked?.path) {
+        const r = await api.post("/api/models/from-path", { path: picked.path });
+        toast(`Linked ${r.model.name} — analyzing structure…`);
+        refresh();
+      }
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "local file open failed", "err");
+    }
+    setUploading(false);
+  };
+
   return (
     <div className="mx-auto max-w-7xl px-8 py-8">
-      <header className="mb-6 flex items-end justify-between">
+      <header className="mb-6 flex items-end justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold text-zinc-100">Models</h1>
           <p className="mt-1 text-sm text-zinc-500">
             Upload DWG / DXF / 3DM / SKP / STEP files — layers, blocks and parts are extracted for finish mapping.
           </p>
         </div>
-        <input ref={fileRef} type="file" hidden accept=".dwg,.dxf,.3dm,.skp,.obj,.fbx,.step,.stp,.iges,.igs,.sat,.stl,.3ds,.ifc"
-          onChange={(e) => e.target.files?.[0] && onFile(e.target.files[0])} />
-        <button onClick={() => fileRef.current?.click()} disabled={uploading}
-          className="rounded-lg bg-amber-500 px-4 py-2 text-sm font-medium text-zinc-950 hover:bg-amber-400 disabled:opacity-50">
-          {uploading ? "Uploading…" : "Upload model"}
-        </button>
+        <div className="flex items-center gap-2">
+          <input ref={fileRef} type="file" hidden accept=".dwg,.dxf,.3dm,.skp,.obj,.fbx,.step,.stp,.iges,.igs,.sat,.stl,.3ds,.ifc"
+            onChange={(e) => e.target.files?.[0] && onFile(e.target.files[0])} />
+          <button onClick={onPickLocalFile} disabled={uploading}
+            className="rounded-lg border border-amber-500/50 bg-amber-500/10 px-4 py-2 text-sm font-medium text-amber-300 hover:bg-amber-500/20 disabled:opacity-50"
+            title="Instant zero-copy link for large local .3dm/.dwg files">
+            {uploading ? "Opening…" : "Open local file (instant)"}
+          </button>
+          <button onClick={() => fileRef.current?.click()} disabled={uploading}
+            className="rounded-lg bg-amber-500 px-4 py-2 text-sm font-medium text-zinc-950 hover:bg-amber-400 disabled:opacity-50">
+            {uploading ? "Uploading…" : "Upload model"}
+          </button>
+        </div>
       </header>
 
       {!data && <p className="py-20 text-center text-sm text-zinc-500">Loading…</p>}

@@ -200,7 +200,11 @@ async def complete(job_id: int,
         size = _image_size(data)
         settings = job.settings or {}
         expected = (int(settings.get("width", 1920)), int(settings.get("height", 1080)))
-        if size != expected or (meta.get("width"), meta.get("height")) != expected:
+        flexible_size = bool(settings.get("use_file_vray_settings") or settings.get("batch") or meta.get("batch"))
+        if flexible_size:
+            if (meta.get("width"), meta.get("height")) != size:
+                raise HTTPException(400, f"render dimensions {size} do not match manifest {(meta.get('width'), meta.get('height'))}")
+        elif size != expected or (meta.get("width"), meta.get("height")) != expected:
             raise HTTPException(400, f"render dimensions {size} do not match requested {expected}")
         rel = f"renders/{uuid.uuid4().hex}.png"
         (MEDIA_DIR / rel).write_bytes(data)
@@ -208,7 +212,12 @@ async def complete(job_id: int,
         db.add(Render(job_id=job.id, model_id=model.id, image_path=rel,
                       width=size[0], height=size[1], camera=settings.get("camera", "iso"),
                       duration_s=duration_s or 0.0, finishes_snapshot=snapshot))
-        job.settings = dict(settings, _engine=meta["engine"])
+        extra_settings = {"_engine": meta["engine"]}
+        if meta.get("saved_files"):
+            extra_settings["saved_files"] = meta["saved_files"]
+        if meta.get("output_dir"):
+            extra_settings["output_dir"] = meta["output_dir"]
+        job.settings = dict(settings, **extra_settings)
         if is_test:
             job.settings = dict(job.settings, _simulation=meta["engine"])
         db.commit()

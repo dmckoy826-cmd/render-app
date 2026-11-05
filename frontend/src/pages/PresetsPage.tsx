@@ -74,6 +74,9 @@ export default function PresetsPage() {
                   <svg viewBox="0 0 24 24" className="h-3 w-3 text-zinc-600" fill="none" stroke="currentColor" strokeWidth="2"><path d="M5 12h14m-6-6 6 6-6 6" /></svg>
                   {r.finish_thumb && <img src={r.finish_thumb} alt="" className="h-4 w-4 rounded object-cover" />}
                   <span className="text-zinc-300">{r.finish_name}</span>
+                  {r.scale_multiplier && r.scale_multiplier !== 1 && (
+                    <span className="rounded bg-amber-500/15 px-1 py-0.5 text-[10px] text-amber-300">×{r.scale_multiplier}</span>
+                  )}
                 </span>
               ))}
             </div>
