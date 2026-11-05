@@ -1,98 +1,105 @@
 # Rhino / V-Ray worker
 
-This folder turns the **simulated** render engine into a **real** one by driving your
-licensed Rhino 8 + V-Ray installation on a Windows machine.
+FinishFlow can run Rhino 8 and V-Ray **locally on the Windows machine that already has
+the licenses**. The server may run in WSL on the same computer. No cloud rendering
+service is required.
 
-```
-browser  →  FinishFlow server (FastAPI)  ⇄  worker/agent.py  →  Rhino 8 + V-Ray
-                     job queue               polls /api/agent/*     └─ render → gallery
-```
+**Status: experimental.** The transport and safety checks have automated tests and a
+synthetic worker test, but the Rhino scripts, BlockEdit commands, V-Ray materials,
+texture scale and rendered image have **not yet been verified in a real Rhino/V-Ray
+installation**. A green worker indicator is only a heartbeat, not proof that Rhino,
+V-Ray, a license, geometry, materials or rendering work.
 
-## How routing works (auto mode)
+## Routing and local safety
 
-The server defaults to `RENDER_RUNNER=auto`:
+Set `RENDER_RUNNER=agent` on the API to queue jobs exclusively for the Windows worker.
+The default `auto` mode falls back to a simulated renderer when no heartbeat is present;
+`mock` always uses simulation. The worker sends a heartbeat while Rhino is busy as
+well as between jobs.
 
-* **While the agent is polling** (every poll is a heartbeat; the server considers the
-  worker connected for 90 s after the last beat), analyze + render jobs are routed to
-  your machine. The sidebar shows a pulsing green **"Rhino worker connected"** chip with
-  the machine's hostname.
-* **With no worker connected**, jobs fall back to the built-in simulated engine so the
-  UI keeps working (results are watermarked/labeled SIM).
-* `RENDER_RUNNER=agent` forces jobs to wait for a real worker only; `mock` forces
-  simulation only.
+The API has **no authentication** and serves uploaded files under `/media`. Bind it to
+localhost for a single-computer setup, or restrict it to a trusted LAN with a firewall.
+Do not expose it to the public internet. Canceling a running job prevents its result
+from being accepted but does not yet terminate its Rhino process.
 
-## Quickstart (Windows machine with Rhino 8 + V-Ray)
+## Connecting the Windows worker
 
-1. Get this folder onto the machine (clone the repo, or copy `worker/`).
-2. Open `start_worker.bat`, set the two values:
+1. Put the complete `worker/` folder on the Windows computer, including `rhino_scripts/`.
+2. Install Windows Python 3.10+ and `requests`: `py -3 -m pip install requests`.
+3. Edit `start_worker.bat`, or from a Windows terminal in the checkout root set:
    ```bat
-   set FF_API=http://<server-lan-ip>:8000
+   set FF_API=http://127.0.0.1:8000
    set FF_RHINO=C:\Program Files\Rhino 8\System\Rhino.exe
+   py -3 worker\agent.py
    ```
-3. Double-click `start_worker.bat` (installs `requests` if needed, then starts polling).
-4. Watch the FinishFlow sidebar flip to green **"Rhino worker connected"**.
-5. Upload a model or hit **Re-analyze** — the job now runs through real Rhino.
+   This address assumes the Windows host can reach the WSL API through localhost
+   forwarding. If it cannot, diagnose WSL networking before widening the API binding.
+4. If the V-Ray Python wrapper is not found automatically, set `FF_VRAY_SCRIPTS` to the
+   folder containing `rhVRay.py` / `rh8VRay.py` (normally the V-Ray for Rhinoceros
+   installation folder). `FF_POLL` changes the polling interval in seconds.
+5. Connect the worker, then **re-analyze** existing models. Old, DXF-only or simulated
+   structures cannot be used for real renders because their part identifiers are not
+   compatible with the new Rhino analysis. Old part assignments may need to be cleared
+   and remapped.
 
-Manual equivalent: `pip install requests`, set the two env vars, `python agent.py`.
+## First supervised validation
 
-Optional env vars: `FF_POLL` (poll seconds, default 3).
+Watch the Windows worker console and the FinishFlow Jobs page during the first run.
+Use a small copy of a drawing, not the only copy of a production file:
 
-### Connecting to a hosted/dev server
+1. Confirm Rhino can import it without a modal dialog and has correct model units.
+2. Analyze it and compare nested layers, block counts and the tessellated viewer against
+   Rhino. Unsupported object types and preview size limits are explicitly marked as
+   partial. Curves are shown as linework and are not assumed to be renderable surfaces.
+3. Assign a square, known-size swatch to a simple surface, then to a part inside an
+   embedded block. Compare the material, tile size, grain direction and every affected
+   instance in Rhino/V-Ray.
+4. Render at a small resolution using **current V-Ray settings**. Confirm V-Ray is the
+   active renderer, the image is truly a finished V-Ray image, and its resolution and
+   appearance match. Quality presets and denoising controls are not integrated yet.
+5. If a job fails, inspect the error in Jobs and the Windows console. Rhino's error
+   traceback is forwarded when it can be written; GUI/modal failures can still require
+   inspection on Windows. Do not assume that every failure is captured perfectly.
 
-`FF_API` is just a base URL — it also works over HTTPS against a hosted instance
-(e.g. the Arena preview URL of port 8000) as long as the worker machine can reach it.
+## Targeting and current limitations
 
-## First supervised run — checklist
+* Geometry inside nested block definitions is traversed and displayed. Targets are
+  derived from geometry, definition and layer rather than Rhino's changing edit-mode
+  IDs. Distinct objects can be overridden individually; coincident indistinguishable
+  objects share a target and are labeled in the UI.
+* BlockEdit changes the **definition**, so all references of it change. Conflicting
+  assignments across shared nested definitions are rejected. To vary one instance,
+  make its block definition unique in Rhino and re-analyze; automatic per-instance
+  cloning is not implemented.
+* Linked/reference blocks, locked/hidden block objects, scaled block instances, curve
+  finish assignments, stale targets and mismatched BlockEdit copies are rejected. A
+  layer/block assignment covering unsupported object types is rejected; choose supported
+  parts individually instead.
+* Mapping is attempted in model units using a planar projection for planar surfaces or
+  square box projection otherwise. Rectangular swatches on non-planar/multi-face
+  objects are rejected rather than silently stretched. Real V-Ray interpretation,
+  material conversion and physical tile dimensions must still be validated locally.
+  Swatches currently create basic bitmap materials; dedicated metalness/roughness and
+  V-Ray material-library controls are not implemented.
+* The preview is Rhino tessellation/linework, not a V-Ray render; finishes in the viewer
+  are approximate. Older/mock/DXF analyses fall back to clearly labeled bounding boxes.
+* The worker isolates swatches from output, requires a completed V-Ray manifest and
+  correctly sized PNG, and never substitutes a viewport capture for a failed render.
+  These checks cannot replace visual validation of the actual V-Ray output.
 
-The server side of this protocol is fully tested (see dev tools below), but the
-Rhino-side scripts have never touched a real Rhino install, so do the first run
-watching the worker console:
+## Testing without Rhino
 
-1. **V-Ray is the current renderer** in Rhino (Render panel → Current Renderer → V-Ray).
-   The scripts call Rhino's standard `-Render`, which invokes whatever renderer is
-   current. Explicit V-Ray Python API control (sample counts per quality tier,
-   denoising) is marked `TODO(vray-py)` in `render_model.py`.
-2. **Analyze a small DWG/DXF first** — confirm the model page flips to the emerald
-   **RHINO · true geometry** badge and the layers/blocks match your drawing.
-3. **Run a draft render** — confirm the image lands in the gallery.
-4. If a job fails, the **exact Rhino console output** is posted back and shown on the
-   Jobs page (and in `worker` console) — no silent failures.
+From the repository root:
 
-Anything that misbehaves on your Rhino build (command macro names can vary slightly
-between builds) is a one-line fix in `rhino_scripts/` — the transport around it is
-proven.
+```bash
+python -m pip install -r backend/requirements-dev.txt
+python -m unittest discover -s tests -v
+cd frontend && npm ci && npm run build
+```
 
-## What the scripts do
-
-| Script | What it does |
-| --- | --- |
-| `analyze_model.py` | imports DWG/DXF/3DM/SKP/OBJ/STEP… via Rhino's own importers; block instances become parts with `requires_block_edit=true`; solids/surfaces/meshes become parts; 2D linework is grouped per layer; **all coordinates converted to inches** (`RhinoMath.UnitScale`); writes the structure JSON + a shaded viewport capture |
-| `render_model.py` | downloads finish images from the server; creates materials with `SetBitmapTexture` and real-world texture repeat derived from each swatch's inch size vs. object bbox; assigns by **layer / part / block definition** — block targets use the scripted BlockEdit flow (`_-BlockEdit` → assign → `_-BlockEdit _SaveAndClose`, the documented scriptable options) so every instance updates at once; sizes the viewport to the requested output, renders, saves the frame |
-
-The agent launches Rhino with the McNeel-documented pattern for script paths with
-spaces — `/nosplash /notemplate /runscript="-_RunPythonScript (C:\path\script.py) _Exit"`
-— and each script clears the document's Modified flag so `_Exit` can't block on a save
-prompt.
-
-## Agent ↔ server contract
-
-* `GET  /api/agent/jobs/next?name=<host>` — claim oldest queued job (also the heartbeat;
-  payload includes model file URL, structure, and for renders: settings + assignments
-  with finish file URLs & swatch sizes in inches)
-* `POST /api/agent/jobs/{id}/progress` — `{progress, stage}`
-* `POST /api/agent/jobs/{id}/complete` — multipart: `structure` JSON + preview image
-  (analyze jobs) or result images (render jobs); analyze previews from Rhino are kept
-  as-is (not regenerated)
-* `POST /api/agent/jobs/{id}/fail` — `{error}` → shown verbatim on the Jobs page
-
-## Dev tools (no Rhino required)
-
-* `dev_fake_worker.py` — speaks the exact agent protocol and completes jobs with
-  generated structures/images. Use it to test the server side on any machine:
-  `FF_API=http://localhost:8000 python dev_fake_worker.py`
-* `stub_rhino.py` — stands in for `Rhino.exe` so you can test **agent.py's real
-  transport** (downloads, subprocess launch, multipart uploads, failure reporting)
-  on Linux/macOS: `FF_RHINO=/path/to/stub_rhino.py python agent.py`
-
-Both label their output `dev-fake-worker` / `stub-rhino` so results are never
-mistaken for real Rhino/V-Ray output.
+`worker/stub_rhino.py` stands in for Rhino for an end-to-end transport test. Set
+`FF_RHINO` to its absolute path and `FF_ALLOW_STUB=1` on the agent. Its geometry and
+renders are synthetic and the API/gallery label them **SIMULATED TEST**. Never use
+that flag as evidence that Rhino or V-Ray is working. The older `dev_fake_worker.py`
+can test legacy analysis/protocol behavior but does not supply new Rhino targets for
+real-render eligibility.

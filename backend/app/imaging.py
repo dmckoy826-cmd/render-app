@@ -3,7 +3,7 @@ simulated ("mock engine") renders.
 
 The scene renderer draws every part of an analyzed model as an isometric (or front/top)
 box and maps each assigned finish image onto the faces using the finish's real-world
-swatch size, so texture scale in the mock render matches what V-Ray would produce.
+swatch size as a rough preview. This does not validate V-Ray texture mapping.
 """
 from __future__ import annotations
 

@@ -89,7 +89,7 @@ def demo_structure(name: str) -> dict:
     return {
         "units": "inches",
         "source_file": name,
-        "analyzer": "rhino8-worker 1.0 (dev-fake-worker — NOT real Rhino)",
+        "analyzer": "dev-fake-worker (NOT real Rhino)",
         "extents": {"min": [0, 0, 0], "max": [60, 24, 84]},
         "layers": [
             {"name": "LAM-CASE", "color": "#b5651d", "part_count": 1},
@@ -112,7 +112,7 @@ def build_structure(model_path: Path, name: str) -> dict:
         try:
             from app import dxfparse  # backend on sys.path
             s = dxfparse.parse(str(model_path))
-            s["analyzer"] = "rhino8-worker 1.0 (dev-fake-worker, dxf source — NOT real Rhino)"
+            s["analyzer"] = "dev-fake-worker (dxf source — NOT real Rhino)"
             return s
         except Exception as exc:
             log("dxfparse unavailable/failed:", exc)
@@ -155,14 +155,16 @@ def do_render(job: dict, settings: dict, td: Path) -> None:
     progress(job["id"], 25, "dev-fake: applying materials")
     time.sleep(1.0)
     progress(job["id"], 70, "dev-fake: rendering")
-    w = min(int(settings.get("width", 960) or 960), 1280)
-    h = min(int(settings.get("height", 600) or 600), 800)
+    w = int(settings.get("width", 960) or 960)
+    h = int(settings.get("height", 600) or 600)
     out = td / "render.png"
     make_png(out, w, h, "render")
     time.sleep(1.0)
     with open(out, "rb") as fh:
         r = requests.post(f"{API}/api/agent/jobs/{job['id']}/complete",
-                          data={"duration_s": "2.0"},
+                          data={"duration_s": "2.0", "manifest": json.dumps({
+                              "protocol": 1, "engine": "dev-fake-worker", "simulation": True,
+                              "image": "render.png", "width": w, "height": h})},
                           files={"files": (out.name, fh, "image/png")}, timeout=60)
     r.raise_for_status()
 

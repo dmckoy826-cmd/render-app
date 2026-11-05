@@ -88,10 +88,14 @@ def pick_runner() -> str:
     return "mock"
 
 
-def create_job(db: Session, kind: str, model_id: int, settings: dict | None = None) -> Job:
-    which = pick_runner()
+def create_job(db: Session, kind: str, model_id: int, settings: dict | None = None,
+               selected_runner: str | None = None) -> Job:
+    which = selected_runner or pick_runner()
+    settings = dict(settings or {})
+    if kind == "render" and which == "agent":
+        settings["_assignment_snapshot"] = agent_assignment_snapshot(db, model_id)
     job = Job(kind=kind, model_id=model_id, status="queued", runner=which,
-              settings=settings or {},
+              settings=settings,
               stage="Queued" if which == "mock" else "Waiting for Rhino worker")
     db.add(job)
     db.commit()
@@ -177,6 +181,8 @@ def apply_analysis(db: Session, model: ModelDoc, structure: dict,
     preview_rel: the agent may post a real viewport capture — use it instead of
     regenerating a preview from the structure.
     """
+    old_geometry = (model.structure or {}).get("geometry_url", "")
+    new_geometry = structure.get("geometry_url", "")
     model.structure = structure
     model.units = structure.get("units", "inches")
     if preview_rel is None:
@@ -187,6 +193,12 @@ def apply_analysis(db: Session, model: ModelDoc, structure: dict,
     model.preview_path = prev_rel
     model.status = "ready"
     db.commit()
+    old_file = config.geometry_file_from_url(old_geometry)
+    if old_file is not None and old_geometry != new_geometry:
+        try:
+            old_file.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 # --------------------------------------------------------------------------- #
@@ -222,8 +234,8 @@ def build_finish_lookup(db: Session, model: ModelDoc) -> tuple[dict, dict, list[
             if not f:
                 continue
             for p in structure.get("parts", []):
-                hit = (a.target_kind == "part" and p["name"] == a.target_name) or \
-                      (a.target_kind == "block" and p.get("block") == a.target_name)
+                hit = (a.target_kind == "part" and (p["name"] == a.target_name or p["id"] == a.target_name)) or \
+                      (a.target_kind == "block" and (p.get("block") == a.target_name or a.target_name in p.get("block_ancestors", [])))
                 if hit:
                     tex = imaging.Image.open(str(config.MEDIA_DIR / f.storage_path)).convert("RGB")
                     tex.thumbnail((1024, 1024))
@@ -235,6 +247,35 @@ def build_finish_lookup(db: Session, model: ModelDoc) -> tuple[dict, dict, list[
                     layer_colors[vlayer] = layer_colors.get(p["layer"], "#8d929a")
     return finish_lookup, layer_colors, list(by_finish.values())
 
+
+
+
+def agent_assignment_snapshot(db: Session, model_id: int) -> list[dict]:
+    """Freeze finish targets and dimensions when a real render is queued."""
+    from .routers.finishes import finish_out
+    assignments = []
+    for row in db.query(Assignment).filter(Assignment.model_id == model_id).all():
+        finish = db.get(Finish, row.finish_id)
+        payload = None if finish is None else {**finish_out(finish),
+                                                "file_url": f"/media/{finish.storage_path}"}
+        assignments.append({"target_kind": row.target_kind, "target_name": row.target_name,
+                            "scale_multiplier": row.scale_multiplier, "finish": payload})
+    return assignments
+
+def snapshot_from_agent_assignments(assignments: list[dict]) -> list[dict]:
+    """Capture exactly what was sent to the worker, not later UI edits."""
+    by_finish: dict[int, dict] = {}
+    for assignment in assignments:
+        finish = assignment.get("finish") or {}
+        if finish.get("id") is None:
+            continue
+        snap = by_finish.setdefault(finish["id"], {
+            "finish_id": finish["id"], "name": finish.get("name", ""),
+            "category": finish.get("category", "other"),
+            "thumb": finish.get("thumb_url") or finish.get("image_url", ""), "targets": [],
+        })
+        snap["targets"].append(f"{assignment['target_kind']}:{assignment['target_name']}")
+    return list(by_finish.values())
 
 def _mock_render(db: Session, job: Job) -> None:
     model = db.get(ModelDoc, job.model_id)

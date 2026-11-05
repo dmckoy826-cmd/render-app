@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
 from .. import automatch, runner
-from ..config import MEDIA_DIR, MODEL_DIR
+from ..config import MEDIA_DIR, MODEL_DIR, geometry_file_from_url
 from ..db import get_db
 from ..models import Assignment, Finish, Job, ModelDoc, Preset, Render
 from ..schemas import AssignmentIn, AutoMatchApplyIn, PresetApplyIn
@@ -129,6 +129,10 @@ def delete_model(model_id: int, db: Session = Depends(get_db)):
         (MEDIA_DIR / m.storage_path).unlink(missing_ok=True)
         if m.preview_path:
             (MEDIA_DIR / m.preview_path).unlink(missing_ok=True)
+        geometry_url = (m.structure or {}).get("geometry_url", "")
+        geometry_file = geometry_file_from_url(geometry_url)
+        if geometry_file is not None:
+            geometry_file.unlink(missing_ok=True)
     except OSError:
         pass
     db.delete(m)
@@ -171,6 +175,14 @@ def set_assignment(model_id: int, body: AssignmentIn, db: Session = Depends(get_
     else:
         if not db.get(Finish, body.finish_id):
             raise HTTPException(404, "finish not found")
+        structure = m.structure or {}
+        if body.target_kind == "part":
+            valid = {p["id"] if structure.get("target_schema") == "rhino-geometry-v1" else p["name"]
+                     for p in structure.get("parts", [])}
+        else:
+            valid = {entry["name"] for entry in structure.get(body.target_kind + "s", [])}
+        if body.target_name not in valid:
+            raise HTTPException(409, "Target is missing or stale; re-analyze and select a current target.")
         runner.upsert_assignment(db, model_id, body.target_kind, body.target_name,
                                  body.finish_id, body.scale_multiplier)
     rows = db.query(Assignment).filter(Assignment.model_id == model_id).all()
@@ -190,16 +202,13 @@ def automatch_suggest(model_id: int, min_score: float = 0.35, db: Session = Depe
     if not m or not m.structure:
         raise HTTPException(404, "model not analyzed yet")
     finishes = db.query(Finish).all()
-    kinds = dict(_targets(m))
     out = []
-    for s in automatch.suggest([n for _, n in _targets(m)], finishes, min_score=min_score):
-        out.append({
-            "target_kind": kinds.get(s["target_name"], "layer"),
-            "target_name": s["target_name"],
-            "finish_id": s["finish"].id,
-            "finish": finish_out(s["finish"]),
-            "score": s["score"],
-        })
+    for kind, name in _targets(m):
+        for s in automatch.suggest([name], finishes, min_score=min_score):
+            out.append({"target_kind": kind, "target_name": name,
+                        "finish_id": s["finish"].id, "finish": finish_out(s["finish"]),
+                        "score": s["score"]})
+    out.sort(key=lambda item: item["score"], reverse=True)
     return out
 
 
@@ -233,27 +242,37 @@ def apply_preset(model_id: int, preset_id: int, body: PresetApplyIn,
     if not preset:
         raise HTTPException(404, "preset not found")
     matches = []
-    for kind, name in _targets(m):
+    existing = {(a.target_kind, a.target_name) for a in
+                db.query(Assignment).filter(Assignment.model_id == model_id).all()}
+    targets = [(kind, name, name) for kind, name in _targets(m)]
+    struct = m.structure or {}
+    targets += [("part", p["name"], p["id"] if struct.get("target_schema") == "rhino-geometry-v1" else p["name"])
+                for p in struct.get("parts", [])]
+    for kind, name, target in targets:
+        if not body.overwrite and (kind, target) in existing:
+            continue
         for rule in preset.rules or []:
             if rule.get("target_kind", "layer") != kind:
                 continue
             pattern = rule.get("pattern", "")
+            match_name = target if rule.get("target_property") == "identity" else name
             mode = rule.get("match", "contains")
             hit = False
             try:
                 if mode == "exact":
-                    hit = name.upper() == pattern.upper()
+                    hit = match_name.upper() == pattern.upper()
                 elif mode == "starts_with":
-                    hit = name.upper().startswith(pattern.upper())
+                    hit = match_name.upper().startswith(pattern.upper())
                 elif mode == "regex":
-                    hit = re.search(pattern, name, re.IGNORECASE) is not None
+                    hit = re.search(pattern, match_name, re.IGNORECASE) is not None
                 else:
-                    hit = pattern.upper() in name.upper()
+                    hit = pattern.upper() in match_name.upper()
             except re.error:
                 hit = False
             if hit and db.get(Finish, rule.get("finish_id")):
-                runner.upsert_assignment(db, model_id, kind, name, rule["finish_id"])
-                matches.append({"target_kind": kind, "target_name": name,
+                runner.upsert_assignment(db, model_id, kind, target, rule["finish_id"],
+                                         rule.get("scale_multiplier", 1.0))
+                matches.append({"target_kind": kind, "target_name": target,
                                 "finish_id": rule["finish_id"]})
                 break
     rows = db.query(Assignment).filter(Assignment.model_id == model_id).all()
