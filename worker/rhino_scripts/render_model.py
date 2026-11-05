@@ -60,21 +60,27 @@ def ensure_vray():
 
 def vray_wrapper():
     # Chaos documents these wrappers under its V-Ray for Rhinoceros installation.
-    roots = [os.environ.get("FF_VRAY_SCRIPTS", ""),
-             os.path.join(os.environ.get("PROGRAMFILES", r"C:\Program Files"),
-                          "Chaos", "V-Ray", "V-Ray for Rhinoceros")]
+    program_files = os.environ.get("PROGRAMFILES", r"C:\Program Files")
+    roots = [
+        os.environ.get("FF_VRAY_SCRIPTS", ""),
+        os.path.join(program_files, "Chaos", "V-Ray", "V-Ray for Rhinoceros"),
+        os.path.join(program_files, "Chaos Group", "V-Ray", "V-Ray for Rhinoceros"),
+    ]
+    for base in (os.path.join(program_files, "Chaos"), os.path.join(program_files, "Chaos Group")):
+        if os.path.isdir(base):
+            for dirpath, _dirnames, filenames in os.walk(base):
+                if "rh8VRay.py" in filenames or "rhVRay.py" in filenames:
+                    roots.append(dirpath)
     for root in roots:
         if root and os.path.isdir(root) and root not in sys.path:
             sys.path.append(root)
-    try:
-        if sys.version_info[0] >= 3:
-            import rh8VRay as wrapper
-        else:
-            import rhVRay as wrapper
-        return wrapper
-    except ImportError:
-        raise RuntimeError("V-Ray's Rhino Python wrapper could not be loaded. Set FF_VRAY_SCRIPTS "
-                           "to the folder containing rhVRay.py/rh8VRay.py.")
+    for mod_name in ("rh8VRay", "rhVRay") if sys.version_info[0] >= 3 else ("rhVRay", "rh8VRay"):
+        try:
+            return __import__(mod_name)
+        except ImportError:
+            continue
+    raise RuntimeError("V-Ray's Rhino Python wrapper could not be loaded. Set FF_VRAY_SCRIPTS "
+                       "to the folder containing rhVRay.py/rh8VRay.py.")
 
 
 def make_material(assignment):
@@ -283,7 +289,10 @@ def main():
         structure = json.load(fh)
     if structure.get("target_schema") != SCHEMA:
         raise RuntimeError("This model needs a fresh analysis by the updated Rhino worker before rendering.")
-    if rs.Command('-_Import "%s" _Enter' % MODEL, False) is False or not rs.AllObjects():
+    rs.EnableRedraw(False)
+    ok = rs.Command('-_Import "%s" _Enter' % MODEL, False)
+    rs.EnableRedraw(True)
+    if ok is False or not rs.AllObjects():
         raise RuntimeError("Rhino could not import %s." % MODEL)
     scene = scan_document(include_geometry=False)
     if set(p["id"] for p in structure.get("parts", [])) != set(scene.parts):

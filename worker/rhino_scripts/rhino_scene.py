@@ -48,6 +48,32 @@ def box_values(box, factor=1.0):
             "max": [box.Max.X * factor, box.Max.Y * factor, box.Max.Z * factor]}
 
 
+def geometry_fingerprint(geometry, kind):
+    if hasattr(geometry, "crc"):
+        return geometry.DataCRC(0)
+    try:
+        if kind == "brep" and hasattr(geometry, "Faces"):
+            return "%d:%d:%d:%d" % (
+                geometry.Faces.Count,
+                geometry.Edges.Count,
+                geometry.Vertices.Count,
+                1 if geometry.IsSolid else 0,
+            )
+        if kind == "mesh" and hasattr(geometry.Vertices, "Count"):
+            return "%d:%d" % (geometry.Vertices.Count, geometry.Faces.Count)
+        if kind == "extrusion" and hasattr(geometry, "ProfileCount"):
+            return "%d:%d" % (geometry.ProfileCount, 1 if geometry.IsSolid else 0)
+        if kind == "curve" and hasattr(geometry, "Degree"):
+            return "%d:%d:%.4f" % (
+                geometry.Degree,
+                1 if geometry.IsClosed else 0,
+                float(geometry.GetLength()),
+            )
+    except Exception:
+        pass
+    return geometry.DataCRC(0)
+
+
 def identity(obj, owner):
     geometry = obj.Geometry
     kind, renderable = geometry_kind(geometry)
@@ -55,9 +81,9 @@ def identity(obj, owner):
         return None
     layer, color = layer_of(obj)
     local_bbox = box_values(geometry.GetBoundingBox(True))
-    # Geometry CRC does not depend on the per-import RhinoObject ID. Rechecking
-    # the same signature inside BlockEdit is essential: edit-mode IDs change.
-    crc = geometry.DataCRC(0)
+    # Geometry fingerprint does not depend on per-import RhinoObject IDs or
+    # non-deterministic DWG/ACIS Brep DataCRC across Rhino processes.
+    crc = geometry_fingerprint(geometry, kind)
     name = obj.Attributes.Name or ""
     key = part_key(owner, layer, kind, crc, local_bbox, name)
     display = name or "%s %s" % (layer, "linework" if kind == "curve" else kind)

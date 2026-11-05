@@ -21,7 +21,7 @@ def part_key(owner, layer, kind, crc, bbox, name):
     A CRC is combined with type, name and high-precision local-space bounds. If two
     source objects are indistinguishable, they are explicitly treated as a group.
     """
-    bounds = [round(float(v), 7) for v in bbox["min"] + bbox["max"]]
+    bounds = [round(float(v), 4) for v in bbox["min"] + bbox["max"]]
     value = [owner or "", layer, kind, str(crc), bounds, name or ""]
     encoded = json.dumps(value, ensure_ascii=True, separators=(",", ":")).encode("ascii")
     return "ffp_" + hashlib.sha256(encoded).hexdigest()[:32]
@@ -222,7 +222,7 @@ def topology_signature(scene):
     """Detect lost, added, moved or re-parented geometry after BlockEdit."""
     supported = [("supported", occ["key"], occ["layer"], occ["owner"] or "",
                   tuple(occ["ancestors"]), occ["scaled"],
-                  tuple(round(float(v), 7) for v in occ["bbox"]["min"] + occ["bbox"]["max"]))
+                  tuple(round(float(v), 4) for v in occ["bbox"]["min"] + occ["bbox"]["max"]))
                  for occ in scene.occurrences]
     unsupported = [("unsupported", obj["kind"], obj["layer"], "",
                     tuple(obj["ancestors"]), False, ()) for obj in scene.unsupported]
