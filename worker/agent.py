@@ -56,9 +56,16 @@ def run_rhino(script: Path, env: dict, timeout: float = 3600) -> str:
     `/notemplate` skips the startup template/units dialog.
     """
     e = {**os.environ, **env}
-    cmd = [RHINO, "/nosplash", "/notemplate",
-           f"/runscript=-_RunPythonScript ({script}) _Exit"]
-    log("exec:", " ".join(cmd))
+    if os.name == "nt":
+        # Pass a raw command string on Windows so subprocess.list2cmdline does
+        # not wrap the entire /runscript=... switch in outer quotes, which
+        # causes Rhino 8 to ignore /runscript.
+        cmd = f'"{RHINO}" /nosplash /notemplate /runscript="-_RunPythonScript ({script}) _Exit"'
+        log("exec:", cmd)
+    else:
+        cmd = [RHINO, "/nosplash", "/notemplate",
+               f"/runscript=-_RunPythonScript ({script}) _Exit"]
+        log("exec:", " ".join(cmd))
     try:
         proc = subprocess.run(cmd, env=e, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
