@@ -379,3 +379,7 @@ finally:
         sc.doc.Modified = False
     except Exception:
         pass
+    try:
+        Rhino.RhinoApp.Exit()
+    except Exception:
+        pass

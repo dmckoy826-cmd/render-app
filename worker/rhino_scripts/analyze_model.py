@@ -10,6 +10,8 @@ import sys
 import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import Rhino
+import System
 import rhinoscriptsyntax as rs
 import scriptcontext as sc
 from rhino_scene import scan_document
@@ -35,9 +37,14 @@ def main():
         json.dump(structure, fh, allow_nan=False)
     if OUT_PNG:
         try:
-            rs.Command("-_SetCurrentView _World _Perspective _Enter", False)
+            rs.Command("-_SetCurrentView _World _Perspective", False)
             rs.ZoomExtents()
-            rs.ViewCaptureToFile(OUT_PNG, 1200, 900)
+            view = sc.doc.Views.ActiveView
+            if view is not None:
+                bitmap = view.CaptureToBitmap(System.Drawing.Size(1200, 900))
+                if bitmap is not None:
+                    bitmap.Save(OUT_PNG, System.Drawing.Imaging.ImageFormat.Png)
+                    bitmap.Dispose()
         except Exception as exc:
             print("Preview capture failed (non-fatal): %r" % exc)
     print("ANALYZE_OK %d parts, %d blocks, %d layers" %
@@ -57,5 +64,9 @@ except Exception:
 finally:
     try:
         sc.doc.Modified = False
+    except Exception:
+        pass
+    try:
+        Rhino.RhinoApp.Exit()
     except Exception:
         pass
