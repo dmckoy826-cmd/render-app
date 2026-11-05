@@ -97,7 +97,7 @@ export default function ModelWorkspace() {
   if (!model) return <p className="p-10 text-sm text-zinc-500">Loading model…</p>;
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden">
       {/* header */}
       <header className="flex items-center gap-4 border-b border-zinc-800 px-6 py-4">
         <Link to="/models" className="rounded-lg border border-zinc-800 p-2 text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200">
@@ -176,9 +176,9 @@ export default function ModelWorkspace() {
           )}
         </div>
       ) : (
-        <div className="grid min-h-0 flex-1 grid-cols-1 xl:grid-cols-[1fr_420px]">
+        <div className="grid min-h-0 flex-1 grid-cols-1 grid-rows-[minmax(360px,1fr)_minmax(0,1fr)] overflow-hidden xl:grid-cols-[minmax(0,1fr)_420px] xl:grid-rows-1">
           {/* viewer */}
-          <div className="relative min-h-[420px] border-b border-zinc-800 bg-gradient-to-b from-zinc-900 to-zinc-950 xl:border-b-0 xl:border-r">
+          <div className="relative min-h-[360px] min-w-0 overflow-hidden border-b border-zinc-800 bg-gradient-to-b from-zinc-900 to-zinc-950 xl:border-b-0 xl:border-r">
             <Viewer3D items={stableItems} selected={selected} geometryUrl={model.structure?.geometry_url}
               partial={model.structure?.geometry_status === "partial"}
               simulatedGeometry={!model.structure?.analyzer?.startsWith("rhino") || /fake|stub/i.test(model.structure?.analyzer || "")}

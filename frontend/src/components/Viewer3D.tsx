@@ -104,6 +104,7 @@ export default function Viewer3D({ items, selected, onSelect, geometryUrl, parti
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.domElement.style.display = "block";
     host.appendChild(renderer.domElement);
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 1000000);
@@ -114,9 +115,15 @@ export default function Viewer3D({ items, selected, onSelect, geometryUrl, parti
     light.position.set(140, 200, -100); scene.add(light);
     const group = new THREE.Group(); scene.add(group);
     state.current = { renderer, scene, camera, controls, group, loader: new THREE.TextureLoader(), framed: "" };
+    let lastW = 0, lastH = 0;
     const resize = () => {
       const w = host.clientWidth || 1, h = host.clientHeight || 1;
-      renderer.setSize(w, h); camera.aspect = w / h; camera.updateProjectionMatrix();
+      if (w === lastW && h === lastH) return;
+      lastW = w; lastH = h;
+      renderer.setSize(w, h, false);
+      renderer.domElement.style.width = "100%";
+      renderer.domElement.style.height = "100%";
+      camera.aspect = w / h; camera.updateProjectionMatrix();
     };
     resize();
     const ro = new ResizeObserver(resize); ro.observe(host);
@@ -231,7 +238,7 @@ export default function Viewer3D({ items, selected, onSelect, geometryUrl, parti
     : status === "error" ? "Geometry could not be loaded — bounding-box fallback"
     : status === "mesh" ? (simulatedGeometry ? "Synthetic test geometry — not Rhino" : partial ? "Partial Rhino tessellation — some objects omitted" : "Rhino tessellated geometry · finish preview is approximate")
     : "Bounding-box fallback — not actual CAD geometry";
-  return <div className="h-full w-full"><div ref={hostRef} className="h-full w-full" />
+  return <div className="relative h-full w-full overflow-hidden"><div ref={hostRef} className="absolute inset-0 overflow-hidden" />
     <div className="pointer-events-none absolute bottom-4 left-4 rounded-lg border border-zinc-700 bg-zinc-950/85 px-3 py-2 text-[11px] text-zinc-300">{label}</div>
   </div>;
 }
