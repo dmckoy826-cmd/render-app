@@ -76,8 +76,10 @@ async def create_finish(
     file: UploadFile,
     name: str = Form(None),
     category: str = Form("laminate"),
-    swatch_width_in: float = Form(24.0),
-    swatch_height_in: float = Form(24.0),
+    # No silent default: a wrong real-world size silently mis-scales every texture
+    # that uses this swatch, so callers must state the physical dimensions.
+    swatch_width_in: float | None = Form(None),
+    swatch_height_in: float | None = Form(None),
     seamless: bool = Form(True),
     tags: str = Form(""),
     db: Session = Depends(get_db),
@@ -88,6 +90,9 @@ async def create_finish(
         raise HTTPException(400, f"unsupported image type '{ext}' — use PNG, JPG or WEBP")
     if category not in ("laminate", "pet", "product_finish", "other"):
         raise HTTPException(400, "category must be laminate | pet | product_finish | other")
+    if swatch_width_in is None or swatch_height_in is None:
+        raise HTTPException(400, "swatch real-world dimensions are required "
+                                 "(swatch_width_in and swatch_height_in, in inches)")
     if (not math.isfinite(swatch_width_in) or not math.isfinite(swatch_height_in)
             or swatch_width_in <= 0 or swatch_height_in <= 0):
         raise HTTPException(400, "swatch dimensions must be finite and positive")
