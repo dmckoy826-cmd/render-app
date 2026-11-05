@@ -29,6 +29,8 @@ WIDTH = int(os.environ.get("FF_WIDTH", "1920"))
 HEIGHT = int(os.environ.get("FF_HEIGHT", "1080"))
 QUALITY = os.environ.get("FF_QUALITY", "current")
 CAMERA = os.environ.get("FF_CAMERA", "iso")
+CAMERA_POSE = os.environ.get("FF_CAMERA_POSE", "")
+NAMED_VIEW = os.environ.get("FF_NAMED_VIEW", "")
 API = os.environ.get("FF_API", "http://localhost:8000").rstrip("/")
 
 
@@ -405,11 +407,6 @@ def main():
         raise RuntimeError("The geometry or block structure changed during material assignment; "
                            "the render was stopped to avoid a wrong result.")
 
-    proj_map = {
-        "front": (Rhino.Display.DefinedViewportProjection.Front, "Front"),
-        "top": (Rhino.Display.DefinedViewportProjection.Top, "Top"),
-    }
-    proj, view_name = proj_map.get(CAMERA, (Rhino.Display.DefinedViewportProjection.Perspective, "Perspective"))
     active_view = sc.doc.Views.ActiveView
     if active_view is None:
         views = sc.doc.Views.GetViewList(True, False)
@@ -417,8 +414,44 @@ def main():
     if active_view is None:
         raise RuntimeError("Could not find an active Rhino viewport for rendering.")
     sc.doc.Views.ActiveView = active_view
-    active_view.ActiveViewport.SetProjection(proj, view_name, True)
-    active_view.ActiveViewport.ZoomExtents()
+    vp = active_view.ActiveViewport
+    applied_custom_view = False
+    if NAMED_VIEW:
+        try:
+            nv_idx = sc.doc.NamedViews.FindByName(NAMED_VIEW)
+            if nv_idx >= 0 and sc.doc.NamedViews.Restore(nv_idx, vp):
+                applied_custom_view = True
+            else:
+                raise RuntimeError("Named view '%s' was not found in the Rhino document." % NAMED_VIEW)
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            raise RuntimeError("Could not restore Rhino named view '%s': %s" % (NAMED_VIEW, exc))
+    elif CAMERA_POSE:
+        try:
+            pose = json.loads(CAMERA_POSE)
+            inches_per_unit = Rhino.RhinoMath.UnitScale(sc.doc.ModelUnitSystem, Rhino.UnitSystem.Inches)
+            scale_to_doc = (1.0 / inches_per_unit) if inches_per_unit > 0 else 1.0
+            eye = [float(v) * scale_to_doc for v in pose["eye"]]
+            target = [float(v) * scale_to_doc for v in pose["target"]]
+            up = [float(v) for v in pose.get("up", [0.0, 0.0, 1.0])]
+            vp.SetProjection(Rhino.Display.DefinedViewportProjection.Perspective, "Perspective", False)
+            vp.SetCameraLocations(
+                Rhino.Geometry.Point3d(target[0], target[1], target[2]),
+                Rhino.Geometry.Point3d(eye[0], eye[1], eye[2]),
+            )
+            vp.CameraUp = Rhino.Geometry.Vector3d(up[0], up[1], up[2])
+            applied_custom_view = True
+        except Exception as exc:
+            raise RuntimeError("Could not apply custom 3D viewer camera: %s" % exc)
+    if not applied_custom_view:
+        proj_map = {
+            "front": (Rhino.Display.DefinedViewportProjection.Front, "Front"),
+            "top": (Rhino.Display.DefinedViewportProjection.Top, "Top"),
+        }
+        proj, view_name = proj_map.get(CAMERA, (Rhino.Display.DefinedViewportProjection.Perspective, "Perspective"))
+        vp.SetProjection(proj, view_name, True)
+        vp.ZoomExtents()
     active_view.Redraw()
     settings = sc.doc.RenderSettings
     settings.UseViewportSize = False

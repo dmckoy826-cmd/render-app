@@ -30,6 +30,12 @@ def main():
         raise RuntimeError("Rhino could not import: %s" % MODEL)
     scene = scan_document(include_geometry=True)
     structure = scene.structure(os.path.basename(MODEL))
+    try:
+        named_views = [v.Name for v in sc.doc.NamedViews if getattr(v, "Name", None)]
+        if named_views:
+            structure["named_views"] = named_views
+    except Exception:
+        pass
     with open(OUT_GEOMETRY, "w") as fh:
         json.dump(scene.geometry(), fh, separators=(",", ":"), allow_nan=False)
     # Structure is the success marker: write only after geometry was serialized.

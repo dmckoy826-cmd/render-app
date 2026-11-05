@@ -46,6 +46,19 @@ export interface BlockInfo {
   part_ids: string[];
 }
 
+export interface CameraPose {
+  eye: [number, number, number];
+  target: [number, number, number];
+  up: [number, number, number];
+  fov?: number;
+  label?: string;
+}
+
+export interface SavedCameraView {
+  name: string;
+  pose: CameraPose;
+}
+
 export interface Structure {
   units: string;
   source_file?: string;
@@ -54,6 +67,7 @@ export interface Structure {
   geometry_url?: string;
   geometry_status?: "complete" | "partial";
   geometry_warnings?: string[];
+  named_views?: string[];
   extents: BBox;
   layers: LayerInfo[];
   blocks: BlockInfo[];

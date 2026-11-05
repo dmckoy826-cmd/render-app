@@ -52,6 +52,8 @@ class RenderSettings(BaseModel):
     height: int = Field(default=1080, ge=1, le=8192)
     quality: str = Field(default="standard", pattern="^(draft|standard|high|current)$")
     camera: str = Field(default="iso", pattern="^(iso|front|top)$")
+    camera_pose: Optional[dict] = None
+    named_view: Optional[str] = None
 
 
 class RenderJobIn(BaseModel):

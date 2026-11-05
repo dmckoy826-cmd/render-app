@@ -184,6 +184,8 @@ def do_render(job: dict, model: dict, settings: dict, assignments: list) -> None
             "FF_WIDTH": str(width), "FF_HEIGHT": str(height),
             "FF_QUALITY": str(settings.get("quality", "current")),
             "FF_CAMERA": str(settings.get("camera", "iso")),
+            "FF_CAMERA_POSE": json.dumps(settings["camera_pose"]) if settings.get("camera_pose") else "",
+            "FF_NAMED_VIEW": str(settings.get("named_view") or ""),
             "FF_API": API,
         })
         if error.exists():

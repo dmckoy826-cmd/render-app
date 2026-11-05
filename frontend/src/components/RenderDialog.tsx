@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import Modal from "./Modal";
 import JobProgress from "./JobProgress";
 import { api, toast } from "../api";
-import type { Job, SystemInfo } from "../types";
+import type { CameraPose, Job, SavedCameraView, SystemInfo } from "../types";
 import { usePoll } from "../hooks";
 
 const RESOLUTIONS = [
@@ -12,13 +12,21 @@ const RESOLUTIONS = [
   { label: "Square 1600×1600", w: 1600, h: 1600 },
 ];
 
-export default function RenderDialog({ open, onClose, modelId, onDone }: {
-  open: boolean; onClose: () => void; modelId: number; onDone: () => void;
+export default function RenderDialog({
+  open, onClose, modelId, onDone, currentCameraPose, savedViews = [], namedViews = [],
+}: {
+  open: boolean;
+  onClose: () => void;
+  modelId: number;
+  onDone: () => void;
+  currentCameraPose?: CameraPose | null;
+  savedViews?: SavedCameraView[];
+  namedViews?: string[];
 }) {
   const [w, setW] = useState(1920);
   const [h, setH] = useState(1080);
   const [quality, setQuality] = useState<"draft" | "standard" | "high">("standard");
-  const [camera, setCamera] = useState<"iso" | "front" | "top">("iso");
+  const [cameraChoice, setCameraChoice] = useState<string>("viewer");
   const [job, setJob] = useState<Job | null>(null);
   const [busy, setBusy] = useState(false);
   const { data: system } = usePoll<SystemInfo>(() => api.get("/api/system/info"), 5000, open);
@@ -46,7 +54,36 @@ export default function RenderDialog({ open, onClose, modelId, onDone }: {
   const submit = async () => {
     setBusy(true);
     try {
-      const j = await api.post("/api/jobs/render", { model_id: modelId, settings: { width: w, height: h, quality: realWorker ? "current" : quality, camera } });
+      let camera: "iso" | "front" | "top" = "iso";
+      let camera_pose: CameraPose | undefined;
+      let named_view: string | undefined;
+
+      if (cameraChoice === "viewer" && currentCameraPose) {
+        camera = "iso";
+        camera_pose = currentCameraPose;
+      } else if (cameraChoice.startsWith("saved:")) {
+        const name = cameraChoice.slice("saved:".length);
+        const found = savedViews.find((v) => v.name === name);
+        camera = "iso";
+        if (found) camera_pose = found.pose;
+      } else if (cameraChoice.startsWith("rhino:")) {
+        camera = "iso";
+        named_view = cameraChoice.slice("rhino:".length);
+      } else if (cameraChoice === "front" || cameraChoice === "top" || cameraChoice === "iso") {
+        camera = cameraChoice;
+      }
+
+      const j = await api.post("/api/jobs/render", {
+        model_id: modelId,
+        settings: {
+          width: w,
+          height: h,
+          quality: realWorker ? "current" : quality,
+          camera,
+          ...(camera_pose ? { camera_pose } : {}),
+          ...(named_view ? { named_view } : {}),
+        },
+      });
       setJob(j);
     } catch (e) {
       toast(e instanceof Error ? e.message : "failed", "err");
@@ -82,18 +119,42 @@ export default function RenderDialog({ open, onClose, modelId, onDone }: {
                 </select>}
             </div>
             <div>
-              <label className="mb-1.5 block text-xs uppercase tracking-wide text-zinc-500">Camera</label>
-              <select value={camera} onChange={(e) => setCamera(e.target.value as any)}
+              <label className="mb-1.5 block text-xs uppercase tracking-wide text-zinc-500">Camera View</label>
+              <select value={cameraChoice} onChange={(e) => setCameraChoice(e.target.value)}
                 className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-200 outline-none focus:border-amber-500/60">
-                <option value="iso">Perspective</option>
-                <option value="front">Front elevation</option>
-                <option value="top">Top / plan</option>
+                {currentCameraPose && (
+                  <option value="viewer">Current 3D viewer angle</option>
+                )}
+                {savedViews.length > 0 && (
+                  <optgroup label="Saved UI views">
+                    {savedViews.map((sv) => (
+                      <option key={`saved:${sv.name}`} value={`saved:${sv.name}`}>{sv.name}</option>
+                    ))}
+                  </optgroup>
+                )}
+                {namedViews.length > 0 && (
+                  <optgroup label="Rhino Named Views (from file)">
+                    {namedViews.map((nv) => (
+                      <option key={`rhino:${nv}`} value={`rhino:${nv}`}>{nv}</option>
+                    ))}
+                  </optgroup>
+                )}
+                <optgroup label="Standard projections (auto-fit)">
+                  <option value="iso">Perspective (auto-fit)</option>
+                  <option value="front">Front elevation</option>
+                  <option value="top">Top / plan</option>
+                </optgroup>
               </select>
             </div>
           </div>
+          {cameraChoice === "viewer" && currentCameraPose && (
+            <div className="rounded-lg border border-emerald-800/50 bg-emerald-950/20 px-3 py-2 text-[11px] text-emerald-200">
+              Using your exact 3D viewer angle — eye ({currentCameraPose.eye.map((n) => Math.round(n * 10) / 10).join(", ")}) in → target ({currentCameraPose.target.map((n) => Math.round(n * 10) / 10).join(", ")}) in.
+            </div>
+          )}
           <p className="rounded-lg border border-zinc-800 bg-zinc-950 p-3 text-xs leading-relaxed text-zinc-500">
             {realWorker
-              ? "The worker attempts V-Ray rendering, real-world mapping and safe BlockEdit; shared or unsupported targets fail rather than silently changing other parts. V-Ray uses its current quality settings. A connected worker alone does not prove Rhino or V-Ray are working; first-run validation is required."
+              ? "The worker attempts V-Ray rendering, real-world mapping and safe BlockEdit; shared or unsupported targets fail rather than silently changing other parts. V-Ray uses its current quality settings."
               : "This job uses the simulated engine, not V-Ray. Connect the Rhino worker for local rendering."}
           </p>
           <div className="flex justify-end gap-2">

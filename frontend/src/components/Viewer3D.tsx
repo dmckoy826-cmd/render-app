@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import type { BBox } from "../types";
+import type { BBox, CameraPose, SavedCameraView } from "../types";
 
 export interface ViewerItem {
   id: string;
@@ -21,6 +21,10 @@ interface Props {
   geometryUrl?: string;
   partial?: boolean;
   simulatedGeometry?: boolean;
+  onCameraChange?: (pose: CameraPose) => void;
+  savedViews?: SavedCameraView[];
+  onSaveView?: (name: string, pose: CameraPose) => void;
+  onDeleteView?: (name: string) => void;
 }
 
 const texCache = new Map<string, THREE.Texture>();
@@ -73,17 +77,84 @@ function meshGeometry(part: PreviewPart, finish: ViewerItem["finish"], origin: n
 }
 
 /** Rhino model space (x, y, z-up inches) -> Three.js (x, z, -y). */
-export default function Viewer3D({ items, selected, onSelect, geometryUrl, partial, simulatedGeometry }: Props) {
+export default function Viewer3D({
+  items, selected, onSelect, geometryUrl, partial, simulatedGeometry,
+  onCameraChange, savedViews = [], onSaveView, onDeleteView,
+}: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const state = useRef<{
     renderer: THREE.WebGLRenderer; scene: THREE.Scene; camera: THREE.PerspectiveCamera;
     controls: OrbitControls; group: THREE.Group; loader: THREE.TextureLoader; framed: string;
+    origin: [number, number, number]; radius: number;
   } | null>(null);
   const [geometry, setGeometry] = useState<PreviewGeometry | null>(null);
   const [status, setStatus] = useState<"box" | "loading" | "mesh" | "error">("box");
+  const [newViewName, setNewViewName] = useState("");
+  const [savingView, setSavingView] = useState(false);
   const selectedKey = [...selected].sort().join("|");
   const onSelectRef = useRef(onSelect);
   onSelectRef.current = onSelect;
+  const onCameraChangeRef = useRef(onCameraChange);
+  onCameraChangeRef.current = onCameraChange;
+
+  const emitCameraPose = () => {
+    const st = state.current;
+    if (!st || !onCameraChangeRef.current) return;
+    const { camera, controls, origin } = st;
+    const round3 = (n: number) => Math.round(n * 1000) / 1000;
+    const eye: [number, number, number] = [
+      round3(camera.position.x + origin[0]),
+      round3(-camera.position.z + origin[1]),
+      round3(camera.position.y + origin[2]),
+    ];
+    const target: [number, number, number] = [
+      round3(controls.target.x + origin[0]),
+      round3(-controls.target.z + origin[1]),
+      round3(controls.target.y + origin[2]),
+    ];
+    const up: [number, number, number] = [
+      round3(camera.up.x),
+      round3(-camera.up.z),
+      round3(camera.up.y),
+    ];
+    onCameraChangeRef.current({ eye, target, up, fov: camera.fov });
+  };
+
+  const applyPresetAngle = (preset: "iso" | "front" | "top" | "right") => {
+    const st = state.current;
+    if (!st) return;
+    const { camera, controls, radius } = st;
+    const r = radius || 50;
+    controls.target.set(0, 0, 0);
+    camera.up.set(0, 1, 0);
+    if (preset === "iso") camera.position.set(r * 1.5, r * 1.05, -r * 1.5);
+    else if (preset === "front") camera.position.set(0, 0, r * 2.2);
+    else if (preset === "right") camera.position.set(r * 2.2, 0, 0);
+    else if (preset === "top") {
+      camera.position.set(0, r * 2.4, 0.001);
+    }
+    controls.update();
+    emitCameraPose();
+  };
+
+  const applySavedPose = (pose: CameraPose) => {
+    const st = state.current;
+    if (!st) return;
+    const { camera, controls, origin } = st;
+    camera.position.set(
+      pose.eye[0] - origin[0],
+      pose.eye[2] - origin[2],
+      -(pose.eye[1] - origin[1]),
+    );
+    controls.target.set(
+      pose.target[0] - origin[0],
+      pose.target[2] - origin[2],
+      -(pose.target[1] - origin[1]),
+    );
+    camera.up.set(pose.up[0], pose.up[2], -pose.up[1]);
+    controls.update();
+    emitCameraPose();
+  };
 
   useEffect(() => {
     if (!geometryUrl) { setGeometry(null); setStatus("box"); return; }
@@ -114,7 +185,12 @@ export default function Viewer3D({ items, selected, onSelect, geometryUrl, parti
     const light = new THREE.DirectionalLight(0xffffff, 1.8);
     light.position.set(140, 200, -100); scene.add(light);
     const group = new THREE.Group(); scene.add(group);
-    state.current = { renderer, scene, camera, controls, group, loader: new THREE.TextureLoader(), framed: "" };
+    state.current = {
+      renderer, scene, camera, controls, group, loader: new THREE.TextureLoader(),
+      framed: "", origin: [0, 0, 0], radius: 50,
+    };
+    const onControlEnd = () => emitCameraPose();
+    controls.addEventListener("end", onControlEnd);
     let lastW = 0, lastH = 0;
     const resize = () => {
       const w = host.clientWidth || 1, h = host.clientHeight || 1;
@@ -148,6 +224,7 @@ export default function Viewer3D({ items, selected, onSelect, geometryUrl, parti
     renderer.domElement.addEventListener("pointerup", pu);
     return () => {
       cancelAnimationFrame(raf); ro.disconnect();
+      controls.removeEventListener("end", onControlEnd);
       renderer.domElement.removeEventListener("pointerdown", pd);
       renderer.domElement.removeEventListener("pointerup", pu);
       controls.dispose(); renderer.dispose();
@@ -173,7 +250,10 @@ export default function Viewer3D({ items, selected, onSelect, geometryUrl, parti
       min[i] = Math.min(min[i], item.bbox.min[i]); max[i] = Math.max(max[i], item.bbox.max[i]);
     }
     // Recenter before converting to float32 so large CAD coordinates retain detail.
-    const origin = min.map((v, i) => (v + max[i]) / 2);
+    const origin = min.map((v, i) => (v + max[i]) / 2) as [number, number, number];
+    const radius = Math.hypot(max[0] - min[0], max[1] - min[1], max[2] - min[2]) / 2 || 50;
+    st.origin = origin;
+    st.radius = radius;
     const geometryById = new Map((geometry?.parts || []).map((part) => [part.id, part]));
     const showBoxes = !geometry;
     for (const item of items) {
@@ -226,11 +306,11 @@ export default function Viewer3D({ items, selected, onSelect, geometryUrl, parti
     }
     const frameKey = `${geometryUrl || "boxes"}:${min.join(",")}:${max.join(",")}:${items.map((i) => i.id).join("|")}`;
     if (st.framed !== frameKey) {
-      const radius = Math.hypot(max[0] - min[0], max[1] - min[1], max[2] - min[2]) / 2 || 50;
       camera.position.set(radius * 1.5, radius * 1.05, -radius * 1.5);
       camera.near = Math.max(radius / 10000, 0.001); camera.far = Math.max(radius * 100, 10000);
       camera.updateProjectionMatrix(); controls.target.set(0, 0, 0); controls.update();
       st.framed = frameKey;
+      emitCameraPose();
     }
   }, [items, geometry, geometryUrl, selectedKey]);
 
@@ -239,6 +319,77 @@ export default function Viewer3D({ items, selected, onSelect, geometryUrl, parti
     : status === "mesh" ? (simulatedGeometry ? "Synthetic test geometry — not Rhino" : partial ? "Partial Rhino tessellation — some objects omitted" : "Rhino tessellated geometry · finish preview is approximate")
     : "Bounding-box fallback — not actual CAD geometry";
   return <div className="relative h-full w-full overflow-hidden"><div ref={hostRef} className="absolute inset-0 overflow-hidden" />
+    <div className=" absolute right-4 top-4 z-10 flex flex-col items-end gap-1.5">
+      <div className="flex flex-wrap items-center gap-1 rounded-lg border border-zinc-800/90 bg-zinc-950/85 p-1 text-[11px] backdrop-blur">
+        <span className="px-1.5 text-zinc-500">Camera:</span>
+        {(["iso", "front", "top", "right"] as const).map((p) => (
+          <button key={p} onClick={() => applyPresetAngle(p)}
+            className="rounded px-2 py-1 capitalize text-zinc-300 hover:bg-zinc-800 hover:text-amber-300">
+            {p}
+          </button>
+        ))}
+        {onSaveView && (
+          <button onClick={() => setSavingView((v) => !v)}
+            className="ml-1 rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-amber-300 hover:bg-amber-500/20">
+            + Save view
+          </button>
+        )}
+      </div>
+      {savingView && onSaveView && (
+        <div className="flex items-center gap-1.5 rounded-lg border border-zinc-700 bg-zinc-950/95 p-1.5 text-xs shadow-lg">
+          <input value={newViewName} onChange={(e) => setNewViewName(e.target.value)}
+            placeholder="View name (e.g. Hero)"
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && newViewName.trim() && state.current) {
+                const st = state.current;
+                const round3 = (n: number) => Math.round(n * 1000) / 1000;
+                const pose: CameraPose = {
+                  eye: [round3(st.camera.position.x + st.origin[0]), round3(-st.camera.position.z + st.origin[1]), round3(st.camera.position.y + st.origin[2])],
+                  target: [round3(st.controls.target.x + st.origin[0]), round3(-st.controls.target.z + st.origin[1]), round3(st.controls.target.y + st.origin[2])],
+                  up: [round3(st.camera.up.x), round3(-st.camera.up.z), round3(st.camera.up.y)],
+                  fov: st.camera.fov,
+                  label: newViewName.trim(),
+                };
+                onSaveView(newViewName.trim(), pose);
+                setNewViewName("");
+                setSavingView(false);
+              }
+            }}
+            className="w-36 rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-200 outline-none focus:border-amber-500" />
+          <button onClick={() => {
+            if (!newViewName.trim() || !state.current) return;
+            const st = state.current;
+            const round3 = (n: number) => Math.round(n * 1000) / 1000;
+            const pose: CameraPose = {
+              eye: [round3(st.camera.position.x + st.origin[0]), round3(-st.camera.position.z + st.origin[1]), round3(st.camera.position.y + st.origin[2])],
+              target: [round3(st.controls.target.x + st.origin[0]), round3(-st.controls.target.z + st.origin[1]), round3(st.controls.target.y + st.origin[2])],
+              up: [round3(st.camera.up.x), round3(-st.camera.up.z), round3(st.camera.up.y)],
+              fov: st.camera.fov,
+              label: newViewName.trim(),
+            };
+            onSaveView(newViewName.trim(), pose);
+            setNewViewName("");
+            setSavingView(false);
+          }} className="rounded bg-amber-500 px-2 py-1 text-xs font-medium text-zinc-950 hover:bg-amber-400">Save</button>
+        </div>
+      )}
+      {savedViews.length > 0 && (
+        <div className="flex flex-wrap justify-end gap-1">
+          {savedViews.map((sv) => (
+            <div key={sv.name} className="flex items-center rounded-md border border-zinc-700/80 bg-zinc-950/85 text-[11px] text-zinc-300 backdrop-blur">
+              <button onClick={() => applySavedPose(sv.pose)} className="px-2 py-1 hover:text-amber-300" title="Snap camera to this saved view">
+                {sv.name}
+              </button>
+              {onDeleteView && (
+                <button onClick={() => onDeleteView(sv.name)} className="border-l border-zinc-800 px-1.5 py-1 text-zinc-500 hover:text-red-400" title="Delete saved view">
+                  ×
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
     <div className="pointer-events-none absolute bottom-4 left-4 rounded-lg border border-zinc-700 bg-zinc-950/85 px-3 py-2 text-[11px] text-zinc-300">{label}</div>
   </div>;
 }
