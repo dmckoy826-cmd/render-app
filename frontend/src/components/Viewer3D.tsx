@@ -7,7 +7,7 @@ export interface ViewerItem {
   id: string;
   name: string;
   bbox: BBox;
-  finish: { url: string; sw_w: number; sw_h: number; scale: number; metallic: boolean } | null;
+  finish: { url: string; sw_w: number; sw_h: number; scale_w: number; scale_h: number; metallic: boolean } | null;
   color: string;
   rbe: boolean;
   conflict?: boolean;
@@ -53,8 +53,8 @@ function meshGeometry(part: PreviewPart, finish: ViewerItem["finish"], origin: n
   const geo = indexed.toNonIndexed();
   indexed.dispose();
   const uv: number[] = [];
-  const sw = Math.max(finish.sw_w * finish.scale, 0.00001);
-  const sh = Math.max(finish.sw_h * finish.scale, 0.00001);
+  const sw = Math.max(finish.sw_w * finish.scale_w, 0.00001);
+  const sh = Math.max(finish.sw_h * finish.scale_h, 0.00001);
   for (let i = 0; i < part.triangles.length; i += 3) {
     const vertices = part.triangles.slice(i, i + 3).map((n) =>
       new THREE.Vector3(part.positions[n * 3], part.positions[n * 3 + 1], part.positions[n * 3 + 2]));
@@ -200,8 +200,8 @@ export default function Viewer3D({ items, selected, onSelect, geometryUrl, parti
           const base = [[0, 1], [1, 1], [0, 0], [1, 0]];
           const dx = x1 - x0, dy = y1 - y0, dz = z1 - z0;
           const dims = [[dy, dz], [dy, dz], [dx, dy], [dx, dy], [dx, dz], [dx, dz]];
-          const sw = Math.max(item.finish.sw_w * item.finish.scale, 0.00001);
-          const sh = Math.max(item.finish.sw_h * item.finish.scale, 0.00001);
+          const sw = Math.max(item.finish.sw_w * item.finish.scale_w, 0.00001);
+          const sh = Math.max(item.finish.sw_h * item.finish.scale_h, 0.00001);
           for (let f = 0; f < 6; f++) for (let k = 0; k < 4; k++)
             uv.setXY(f * 4 + k, base[k][0] * dims[f][0] / sw, base[k][1] * dims[f][1] / sh);
           uv.needsUpdate = true;

@@ -367,7 +367,7 @@ export default function ModelWorkspace() {
                       <span className="min-w-0 flex-1 truncate text-sm text-zinc-200">{a.target_kind === "part" ? (model.structure?.parts.find((p) => partTarget(p) === a.target_name)?.name || `${a.target_name} (stale target)`) : a.target_name}</span>
                       {a.finish && <img src={a.finish.thumb_url} alt="" className="h-7 w-7 rounded object-cover" />}
                       <span className="w-32 truncate text-xs text-zinc-400">{a.finish?.name}</span>
-                      <AssignmentScalePair valueW={a.scale_width} valueH={a.scale_height} onSave={(w, h) => assign({ kind: a.target_kind, name: a.target_name }, a.finish_id, w, h)} />
+                      <AssignmentScalePair width={a.scale_width} height={a.scale_height} onSave={(w, h) => assign({ kind: a.target_kind, name: a.target_name }, a.finish_id, w, h)} />
                       <button onClick={() => setPicker({ kind: a.target_kind, name: a.target_name })}
                         className="rounded-lg border border-zinc-700 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800">Change</button>
                       <button onClick={() => assign({ kind: a.target_kind, name: a.target_name }, null)}
