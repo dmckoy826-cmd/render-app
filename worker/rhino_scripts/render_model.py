@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """Apply safely identified Rhino materials and request a synchronous V-Ray render.
 
 Supports single renders and Batch SKU Layer x Finish Queue renders, with per-target
@@ -713,7 +714,7 @@ def run_batch(batch_cfg, renderer, vray):
             label = var.get("label") or ("Render_%d" % (var_i + 1))
             report_progress(
                 pct,
-                "SKU %d/%d (%s) · Finish %d/%d (%s)" % (
+                "SKU %d/%d (%s) - Finish %d/%d (%s)" % (
                     sku_i + 1, len(sku_layers), sku_folder_name,
                     var_i + 1, len(variations), label,
                 ),
