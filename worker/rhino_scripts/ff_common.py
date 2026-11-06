@@ -183,7 +183,8 @@ class SceneBuilder(object):
                       for _, d in sorted(self.sku_layers.items()) if d["part_layers"] or d["blocks"]]
         out = {"units": "inches", "source_file": source_file,
                "analyzer": "rhino8-worker 2.0", "target_schema": SCHEMA,
-               "preview_schema": 2,
+               "preview_schema": 3,
+               "layer_visibility_schema": "rhino-instance-definition-v1",
                "extents": self.extents, "layers": layers, "blocks": blocks, "parts": parts,
                "geometry_status": "partial" if self.partial else "complete",
                "geometry_warnings": list(self.warnings)}

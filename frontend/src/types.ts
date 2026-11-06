@@ -78,6 +78,7 @@ export interface Structure {
   geometry_api_url?: string;
   geometry_status?: "complete" | "partial";
   preview_schema?: number;
+  layer_visibility_schema?: string;
   geometry_warnings?: string[];
   named_views?: string[];
   sku_layers?: SkuLayerInfo[];
