@@ -50,18 +50,13 @@ export default function FinishPicker({
   const [customLabel, setCustomLabel] = useState("");
 
   useEffect(() => {
-    if (open) {
-      const s = initialScale && initialScale > 0 ? initialScale : 1;
-      setScale(s);
-      setScaleDraft(String(s));
-      setSavedScales(loadSavedScales());
-      if (initialFinishId && data) {
-        setSelectedFinish(data.find((f) => f.id === initialFinishId) || null);
-      } else {
-        setSelectedFinish(null);
-      }
-    }
-  }, [open, initialScale, initialFinishId, data]);
+    if (!open) return;
+    const s = initialScale && initialScale > 0 ? initialScale : 1;
+    setScale(s);
+    setScaleDraft(String(s));
+    setSavedScales(loadSavedScales());
+    setSelectedFinish(null);
+  }, [open, initialScale, initialFinishId]);
 
   const list = (data || []).filter((f) =>
     (cat === "all" || f.category === cat) &&

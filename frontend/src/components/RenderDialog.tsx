@@ -70,21 +70,26 @@ export default function RenderDialog({
   }, [skuLayers, partLayers]);
 
   useEffect(() => {
-    if (open) {
-      setMode(initialMode);
+    if (!open) {
       setJob(null);
       setBusy(false);
-      setSelectedSkus(new Set(availableSkus));
-      if (!varyingLayer && partLayers.length > 0) {
-        setVaryingLayer(partLayers[0].name);
-      }
-      if (initialMode === "batch") {
-        setUseFileVray(true);
-        if (namedViews.length > 0) setCameraChoice(`rhino:${namedViews[0]}`);
-        else setCameraChoice("file_active");
-      }
+      return;
     }
-  }, [open, initialMode, availableSkus, partLayers, namedViews]); // eslint-disable-line react-hooks/exhaustive-deps
+    setMode(initialMode);
+    setJob(null);
+    setBusy(false);
+    setSelectedSkus(new Set(availableSkus));
+    if (partLayers.length > 0) {
+      setVaryingLayer((prev) => (prev && partLayers.some((l) => l.name === prev) ? prev : partLayers[0].name));
+    }
+    if (initialMode === "batch") {
+      setUseFileVray(true);
+      if (namedViews.length > 0) setCameraChoice(`rhino:${namedViews[0]}`);
+      else setCameraChoice("file_active");
+    } else if (currentCameraPose) {
+      setCameraChoice("viewer");
+    }
+  }, [open, initialMode]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const active = job && !["done", "failed", "canceled"].includes(job.status);
 
