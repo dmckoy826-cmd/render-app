@@ -224,18 +224,19 @@ class AgentApiTests(unittest.TestCase):
             finish = Finish(name="Walnut", category="laminate", original_name="x.png", storage_path="finishes/x.png",
                             thumb_path="", swatch_width_in=12, swatch_height_in=12)
             db.add(finish); db.commit(); db.refresh(finish); fid = finish.id
-        request = {"target_kind": "part", "target_name": "p1", "finish_id": fid, "scale_multiplier": 2.5}
+        request = {"target_kind": "part", "target_name": "p1", "finish_id": fid, "scale_width": 2.5, "scale_height": 2.5}
         self.assertEqual(self.client.post(f"/api/models/{model_id}/assignments", json=request).status_code, 200)
         saved = self.client.post("/api/presets/from-model", json={"model_id": model_id, "name": "Only one panel"})
         self.assertEqual(saved.status_code, 200, saved.text)
         rule = saved.json()["rules"][0]
-        self.assertEqual((rule["target_property"], rule["match"], rule["pattern"], rule["scale_multiplier"]),
-                         ("identity", "exact", "p1", 2.5))
+        self.assertEqual((rule["target_property"], rule["match"], rule["pattern"], rule["scale_width"], rule["scale_height"]),
+                         ("identity", "exact", "p1", 2.5, 2.5))
         self.client.post(f"/api/models/{model_id}/assignments", json=dict(request, finish_id=None))
         applied = self.client.post(f"/api/models/{model_id}/presets/{saved.json()['id']}/apply", json={"overwrite": True}).json()
         self.assertEqual(applied["applied"], 1)
         self.assertEqual(applied["assignments"][0]["target_name"], "p1")
-        self.assertEqual(applied["assignments"][0]["scale_multiplier"], 2.5)
+        self.assertEqual(applied["assignments"][0]["scale_width"], 2.5)
+        self.assertEqual(applied["assignments"][0]["scale_height"], 2.5)
         unsafe = self.client.post("/api/presets", json={"name": "Unsafe", "rules": [{"target_kind": "part",
             "target_property": "identity", "match": "contains", "pattern": "p", "finish_id": fid}]})
         self.assertEqual(unsafe.status_code, 422)

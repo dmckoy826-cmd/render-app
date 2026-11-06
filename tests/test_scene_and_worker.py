@@ -16,8 +16,8 @@ import agent
 BOX = {"min": [0, 0, 0], "max": [2, 2, 2]}
 
 
-def assignment(kind, target, finish_id=1, scale=1):
-    return {"target_kind": kind, "target_name": target, "scale_multiplier": scale,
+def assignment(kind, target, finish_id=1, scale_width=1, scale_height=1):
+    return {"target_kind": kind, "target_name": target, "scale_width": scale_width, "scale_height": scale_height,
             "finish": {"id": finish_id, "swatch_width_in": 12, "swatch_height_in": 12}}
 
 
@@ -80,7 +80,7 @@ class TargetingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "stale or missing"):
             common.plan_assignments(shared_scene(), [assignment("part", "old-name")])
         with self.assertRaisesRegex(ValueError, "finite"):
-            common.plan_assignments(shared_scene(), [assignment("layer", "INNER", scale=float("nan"))])
+            common.plan_assignments(shared_scene(), [assignment("layer", "INNER", scale_width=float("nan"), scale_height=1.0)])
         with self.assertRaisesRegex(ValueError, "linework"):
             common.plan_assignments(shared_scene(renderable=False), [assignment("layer", "INNER")])
         with self.assertRaisesRegex(ValueError, "scaled block"):
