@@ -3,7 +3,11 @@ import { Link, useParams } from "react-router-dom";
 import { api, fmtDate, toast } from "../api";
 import { usePoll } from "../hooks";
 import Viewer3D, { type ViewerItem } from "../components/Viewer3D";
-import FinishPicker, { loadSavedScales, saveScalesList } from "../components/FinishPicker";
+import FinishPicker from "../components/FinishPicker";
+import FinishSettingsModal, {
+  formatTransformSummary,
+  type FinishTransformSettings,
+} from "../components/FinishSettingsModal";
 import JobProgress, { StatusChip } from "../components/JobProgress";
 import RenderDialog from "../components/RenderDialog";
 import Modal from "../components/Modal";
@@ -11,47 +15,31 @@ import type { Assignment, CameraPose, Finish, ModelDetail, Part, Preset, RenderR
 
 type Target = { kind: "layer" | "block" | "part"; name: string; label?: string };
 
-function AssignmentScale({
-  value, finish, onSave,
+function AssignmentTransformButton({
+  assignment,
+  onOpen,
 }: {
-  value: number;
-  finish?: Finish | null;
-  onSave: (n: number) => void;
+  assignment: Assignment;
+  onOpen: () => void;
 }) {
-  const [draft, setDraft] = useState(String(value));
-  useEffect(() => setDraft(String(value)), [value]);
-  const effW = finish ? Math.round(finish.swatch_width_in * value * 100) / 100 : null;
-  const effH = finish ? Math.round(finish.swatch_height_in * value * 100) / 100 : null;
-  const quickSave = () => {
-    const list = loadSavedScales();
-    const label = effW && effH ? `${effW}×${effH}" (${value}×)` : `${value}×`;
-    const next = [...list.filter((s) => !(s.label === label && s.scale === value)), { label, scale: value, finishId: finish?.id }];
-    saveScalesList(next);
-    toast(`Saved scale "${label}"`);
-  };
+  const f = assignment.finish;
+  const scale = assignment.scale_multiplier || 1;
+  const effW = f ? Math.round(f.swatch_width_in * scale * 100) / 100 : null;
+  const effH = f ? Math.round(f.swatch_height_in * scale * 100) / 100 : null;
   return (
-    <span className="inline-flex items-center gap-1 text-[10px] text-zinc-500" title={effW && effH ? `Effective tile size: ${effW}×${effH}" (base ${finish?.swatch_width_in}×${finish?.swatch_height_in}")` : "Texture size multiplier"}>
-      <span>×</span>
-      <input
-        type="number"
-        min="0.01"
-        step="0.1"
-        value={draft}
-        aria-label="Texture size multiplier"
-        onChange={(e) => setDraft(e.target.value)}
-        onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
-        onBlur={() => {
-          const n = Number(draft);
-          if (!Number.isFinite(n) || n <= 0) setDraft(String(value));
-          else if (n !== value) onSave(n);
-        }}
-        className="w-12 rounded border border-zinc-700 bg-zinc-950 px-1 py-0.5 text-[11px] text-amber-300"
-      />
-      {effW && effH && <span className="hidden text-[10px] text-zinc-500 sm:inline">({effW}×{effH}&quot;)</span>}
-      <button type="button" onClick={quickSave} className="rounded px-1 py-0.5 text-[10px] text-zinc-500 hover:bg-zinc-800 hover:text-amber-300" title="Save this scale for quick reuse">
-        ★
-      </button>
-    </span>
+    <button
+      type="button"
+      onClick={onOpen}
+      className="inline-flex items-center gap-1 rounded border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[11px] font-mono text-amber-300 hover:bg-amber-500/20"
+      title={
+        effW && effH
+          ? `Adjust Scale (${effW}×${effH}"), Rotation (0–90°), & Seam Offset`
+          : "Adjust Scale, Rotation (0–90°), & Seam Offset"
+      }
+    >
+      <span>⚙</span>
+      <span>{formatTransformSummary(assignment)}</span>
+    </button>
   );
 }
 
@@ -63,6 +51,10 @@ export default function ModelWorkspace() {
     () => api.get(`/api/renders?model_id=${modelId}`), 3000);
   const [tab, setTab] = useState<"structure" | "assignments" | "renders">("structure");
   const [picker, setPicker] = useState<Target | null>(null);
+  const [transformModal, setTransformModal] = useState<{
+    target: Target;
+    assignment: Assignment;
+  } | null>(null);
   const [autoOpen, setAutoOpen] = useState(false);
   const [applyOpen, setApplyOpen] = useState(false);
   const [saveOpen, setSaveOpen] = useState(false);
@@ -98,10 +90,23 @@ export default function ModelWorkspace() {
     try { localStorage.setItem(viewsKey, JSON.stringify(next)); } catch { /* ignore */ }
   };
 
-  const assign = async (t: Target, finishId: number | null, scale = 1) => {
+  const assign = async (
+    t: Target,
+    finishId: number | null,
+    scale = 1,
+    rotationDeg = 0,
+    offsetUIn = 0,
+    offsetVIn = 0
+  ) => {
     try {
       await api.post(`/api/models/${modelId}/assignments`, {
-        target_kind: t.kind, target_name: t.name, finish_id: finishId, scale_multiplier: scale,
+        target_kind: t.kind,
+        target_name: t.name,
+        finish_id: finishId,
+        scale_multiplier: scale,
+        rotation_deg: rotationDeg,
+        offset_u_in: offsetUIn,
+        offset_v_in: offsetVIn,
       });
       await refresh();
     } catch (e) {
@@ -119,7 +124,7 @@ export default function ModelWorkspace() {
       const direct = byKind.part.get(stableTargets ? p.id : p.name);
       const paths = p.block_paths?.length ? p.block_paths : [p.block ? [p.block] : []];
       const resolved = paths.map((path) => direct || [...path].reverse().map((b) => byKind.block.get(b)).find(Boolean) || byKind.layer.get(p.layer));
-      const values = new Set(resolved.map((a) => a ? `${a.finish_id}:${a.scale_multiplier}` : "unassigned"));
+      const values = new Set(resolved.map((a) => a ? `${a.finish_id}:${a.scale_multiplier}:${a.rotation_deg || 0}:${a.offset_u_in || 0}:${a.offset_v_in || 0}` : "unassigned"));
       const conflict = values.size > 1;
       const a = conflict ? undefined : resolved[0];
       return {
@@ -127,7 +132,11 @@ export default function ModelWorkspace() {
         color: colors.get(p.layer) || "#71717a",
         finish: a?.finish ? {
           url: a.finish.image_url, sw_w: a.finish.swatch_width_in, sw_h: a.finish.swatch_height_in,
-          scale: a.scale_multiplier || 1, metallic: false,  // category alone does not imply a metal shader
+          scale: a.scale_multiplier || 1,
+          rotation_deg: a.rotation_deg || 0,
+          offset_u_in: a.offset_u_in || 0,
+          offset_v_in: a.offset_v_in || 0,
+          metallic: false,  // category alone does not imply a metal shader
         } : null,
       };
     });
@@ -284,8 +293,15 @@ export default function ModelWorkspace() {
                       </p>
                       <div className="mt-2 flex flex-wrap items-center gap-2">
                         {assigned?.finish && (
-                          <AssignmentScale value={assigned.scale_multiplier} finish={assigned.finish}
-                            onSave={(scale) => assign({ kind: "part", name: target }, assigned.finish_id, scale)} />
+                          <AssignmentTransformButton
+                            assignment={assigned}
+                            onOpen={() =>
+                              setTransformModal({
+                                target: { kind: "part", name: target, label: p.name },
+                                assignment: assigned,
+                              })
+                            }
+                          />
                         )}
                         <button onClick={() => setPicker({ kind: "part", name: target, label: p.name })}
                           className="rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800">{assigned ? "Change override" : "Assign part override"}</button>
@@ -310,8 +326,15 @@ export default function ModelWorkspace() {
                               <>
                                 <img src={a.finish.thumb_url} alt="" className="h-6 w-6 rounded object-cover" />
                                 <span className="max-w-[90px] truncate text-xs text-zinc-400">{a.finish.name}</span>
-                                <AssignmentScale value={a.scale_multiplier} finish={a.finish}
-                                  onSave={(scale) => assign({ kind: "layer", name: l.name }, a.finish_id, scale)} />
+                                <AssignmentTransformButton
+                                  assignment={a}
+                                  onOpen={() =>
+                                    setTransformModal({
+                                      target: { kind: "layer", name: l.name, label: l.name },
+                                      assignment: a,
+                                    })
+                                  }
+                                />
                                 <button onClick={() => assign({ kind: "layer", name: l.name }, null)}
                                   className="rounded p-1 text-zinc-600 hover:bg-zinc-800 hover:text-red-400" title="Clear">✕</button>
                               </>
@@ -346,8 +369,15 @@ export default function ModelWorkspace() {
                                 {a?.finish ? (
                                   <><img src={a.finish.thumb_url} alt="" className="h-6 w-6 rounded object-cover" />
                                     <span className="text-xs text-zinc-400">{a.finish.name}</span>
-                                    <AssignmentScale value={a.scale_multiplier} finish={a.finish}
-                                      onSave={(scale) => assign({ kind: "block", name: b.name }, a.finish_id, scale)} />
+                                    <AssignmentTransformButton
+                                      assignment={a}
+                                      onOpen={() =>
+                                        setTransformModal({
+                                          target: { kind: "block", name: b.name, label: b.name },
+                                          assignment: a,
+                                        })
+                                      }
+                                    />
                                     <button onClick={() => assign({ kind: "block", name: b.name }, null)} className="text-zinc-600 hover:text-red-400">✕</button></>
                                 ) : <span className="text-[11px] text-zinc-600">inherits parent / layer finishes</span>}
                                 <button onClick={() => setPicker({ kind: "block", name: b.name })}
@@ -416,21 +446,33 @@ export default function ModelWorkspace() {
                       <button className="mt-2 text-amber-400 hover:underline" onClick={() => setAutoOpen(true)}>Run auto-match</button> or assign per layer in the Structure tab.
                     </p>
                   )}
-                  {model.assignments.map((a) => (
+                  {model.assignments.map((a) => {
+                    const partLabel = a.target_kind === "part" ? (model.structure?.parts.find((p) => partTarget(p) === a.target_name)?.name || `${a.target_name} (stale target)`) : a.target_name;
+                    return (
                     <div key={a.id} className="flex items-center gap-3 rounded-lg border border-zinc-800 bg-zinc-900/50 px-3 py-2">
                       <span className={`rounded border px-1.5 py-0.5 text-[10px] uppercase ${a.target_kind === "layer" ? "border-zinc-700 text-zinc-400" : a.target_kind === "block" ? "border-cyan-700/50 text-cyan-300" : "border-amber-700/50 text-amber-300"}`}>
                         {a.target_kind}
                       </span>
-                      <span className="min-w-0 flex-1 truncate text-sm text-zinc-200">{a.target_kind === "part" ? (model.structure?.parts.find((p) => partTarget(p) === a.target_name)?.name || `${a.target_name} (stale target)`) : a.target_name}</span>
+                      <span className="min-w-0 flex-1 truncate text-sm text-zinc-200">{partLabel}</span>
                       {a.finish && <img src={a.finish.thumb_url} alt="" className="h-7 w-7 rounded object-cover" />}
                       <span className="w-28 truncate text-xs text-zinc-400">{a.finish?.name}</span>
-                      <AssignmentScale value={a.scale_multiplier} finish={a.finish} onSave={(scale) => assign({ kind: a.target_kind, name: a.target_name }, a.finish_id, scale)} />
-                      <button onClick={() => setPicker({ kind: a.target_kind, name: a.target_name })}
+                      {a.finish && (
+                        <AssignmentTransformButton
+                          assignment={a}
+                          onOpen={() =>
+                            setTransformModal({
+                              target: { kind: a.target_kind, name: a.target_name, label: partLabel },
+                              assignment: a,
+                            })
+                          }
+                        />
+                      )}
+                      <button onClick={() => setPicker({ kind: a.target_kind, name: a.target_name, label: partLabel })}
                         className="rounded-lg border border-zinc-700 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800">Change</button>
                       <button onClick={() => assign({ kind: a.target_kind, name: a.target_name }, null)}
                         className="rounded p-1 text-zinc-600 hover:bg-zinc-800 hover:text-red-400">✕</button>
                     </div>
-                  ))}
+                  );})}
                 </div>
               )}
 
@@ -463,7 +505,44 @@ export default function ModelWorkspace() {
         title={picker ? `Assign finish → ${picker.kind}: ${picker.label || (picker.kind === "part" ? model.structure?.parts.find((p) => partTarget(p) === picker.name)?.name : picker.name) || picker.name}` : ""}
         initialScale={picker ? assignFor(picker)?.scale_multiplier || 1 : 1}
         initialFinishId={picker ? assignFor(picker)?.finish_id || null : null}
-        onPick={(f: Finish, scale: number) => picker && assign(picker, f.id, scale)} />
+        onPick={(f: Finish, scale: number) => {
+          if (!picker) return;
+          const prev = assignFor(picker);
+          assign(
+            picker,
+            f.id,
+            scale,
+            prev?.rotation_deg || 0,
+            prev?.offset_u_in || 0,
+            prev?.offset_v_in || 0
+          );
+        }} />
+      {transformModal && transformModal.assignment.finish && (
+        <FinishSettingsModal
+          targetLabel={`${transformModal.target.kind}: ${
+            transformModal.target.label || transformModal.target.name
+          }`}
+          finish={transformModal.assignment.finish}
+          initial={{
+            scale_multiplier: transformModal.assignment.scale_multiplier || 1,
+            rotation_deg: transformModal.assignment.rotation_deg || 0,
+            offset_u_in: transformModal.assignment.offset_u_in || 0,
+            offset_v_in: transformModal.assignment.offset_v_in || 0,
+          }}
+          onClose={() => setTransformModal(null)}
+          onApply={(next: FinishTransformSettings) => {
+            assign(
+              transformModal.target,
+              transformModal.assignment.finish_id,
+              next.scale_multiplier,
+              next.rotation_deg,
+              next.offset_u_in,
+              next.offset_v_in
+            );
+            setTransformModal(null);
+          }}
+        />
+      )}
       <AutoMatchModal open={autoOpen} onClose={() => setAutoOpen(false)} modelId={modelId} onApplied={refresh} />
       <ApplyPresetModal open={applyOpen} onClose={() => setApplyOpen(false)} modelId={modelId} onApplied={refresh} />
       <Modal open={saveOpen} onClose={() => setSaveOpen(false)} title="Save mapping as preset">
@@ -492,6 +571,9 @@ export default function ModelWorkspace() {
         namedViews={model.structure?.named_views || []}
         skuLayers={model.structure?.sku_layers || []}
         partLayers={model.structure?.layers || []}
+        blocks={model.structure?.blocks || []}
+        parts={model.structure?.parts || []}
+        targetSchema={model.structure?.target_schema}
         assignments={model.assignments || []}
         onDone={() => { refreshRenders(); setTab("renders"); }} />
     </div>

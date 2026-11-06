@@ -104,6 +104,9 @@ export interface Assignment {
   target_name: string;
   finish_id: number;
   scale_multiplier: number;
+  rotation_deg?: number;
+  offset_u_in?: number;
+  offset_v_in?: number;
   finish: Finish | null;
 }
 
@@ -160,6 +163,9 @@ export interface PresetRule {
   target_kind: "layer" | "block" | "part";
   target_property?: "name" | "identity";
   scale_multiplier?: number;
+  rotation_deg?: number;
+  offset_u_in?: number;
+  offset_v_in?: number;
   finish_name?: string;
   finish_thumb?: string;
 }

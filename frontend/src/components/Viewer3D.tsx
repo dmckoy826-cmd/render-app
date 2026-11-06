@@ -7,7 +7,16 @@ export interface ViewerItem {
   id: string;
   name: string;
   bbox: BBox;
-  finish: { url: string; sw_w: number; sw_h: number; scale: number; metallic: boolean } | null;
+  finish: {
+    url: string;
+    sw_w: number;
+    sw_h: number;
+    scale: number;
+    rotation_deg?: number;
+    offset_u_in?: number;
+    offset_v_in?: number;
+    metallic: boolean;
+  } | null;
   color: string;
   rbe: boolean;
   conflict?: boolean;
@@ -59,6 +68,11 @@ function meshGeometry(part: PreviewPart, finish: ViewerItem["finish"], origin: n
   const uv: number[] = [];
   const sw = Math.max(finish.sw_w * finish.scale, 0.00001);
   const sh = Math.max(finish.sw_h * finish.scale, 0.00001);
+  const rad = -((finish.rotation_deg || 0) * Math.PI) / 180;
+  const cosR = Math.cos(rad);
+  const sinR = Math.sin(rad);
+  const offU = finish.offset_u_in || 0;
+  const offV = finish.offset_v_in || 0;
   for (let i = 0; i < part.triangles.length; i += 3) {
     const vertices = part.triangles.slice(i, i + 3).map((n) =>
       new THREE.Vector3(part.positions[n * 3], part.positions[n * 3 + 1], part.positions[n * 3 + 2]));
@@ -67,9 +81,20 @@ function meshGeometry(part: PreviewPart, finish: ViewerItem["finish"], origin: n
       new THREE.Vector3().subVectors(vertices[2], vertices[0]));
     const nx = Math.abs(normal.x), ny = Math.abs(normal.y), nz = Math.abs(normal.z);
     for (const p of vertices) {
-      if (nz >= nx && nz >= ny) uv.push(p.x / sw, p.y / sh);
-      else if (nx >= ny) uv.push(p.y / sw, p.z / sh);
-      else uv.push(p.x / sw, p.z / sh);
+      let s0 = p.x;
+      let t0 = p.z;
+      if (nz >= nx && nz >= ny) {
+        s0 = p.x;
+        t0 = p.y;
+      } else if (nx >= ny) {
+        s0 = p.y;
+        t0 = p.z;
+      }
+      const sShift = s0 - offU;
+      const tShift = t0 - offV;
+      const sRot = sShift * cosR - tShift * sinR;
+      const tRot = sShift * sinR + tShift * cosR;
+      uv.push(sRot / sw, tRot / sh);
     }
   }
   geo.setAttribute("uv", new THREE.Float32BufferAttribute(uv, 2));

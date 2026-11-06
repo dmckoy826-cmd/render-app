@@ -64,6 +64,9 @@ class Assignment(Base):
     finish_id: Mapped[int] = mapped_column(ForeignKey("finishes.id"))
     # Optional per-target scale multiplier (1.0 = use finish's real-world swatch size)
     scale_multiplier: Mapped[float] = mapped_column(Float, default=1.0)
+    rotation_deg: Mapped[float] = mapped_column(Float, default=0.0)
+    offset_u_in: Mapped[float] = mapped_column(Float, default=0.0)
+    offset_v_in: Mapped[float] = mapped_column(Float, default=0.0)
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

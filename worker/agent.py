@@ -200,6 +200,7 @@ def do_render(job: dict, model: dict, settings: dict, assignments: list) -> None
             "FF_NAMED_VIEW": str(settings.get("named_view") or ""),
             "FF_KEEP_FILE_VIEW": "1" if settings.get("keep_file_view") else "",
             "FF_USE_FILE_VRAY": "1" if settings.get("use_file_vray_settings") else "",
+            "FF_ISOLATE_SKU": str(settings.get("isolate_sku_layer") or ""),
             "FF_BATCH": str(batch_path) if isinstance(batch_data, dict) else "",
             "FF_JOB_ID": str(job["id"]),
             "FF_API": API,

@@ -174,14 +174,17 @@ def _assignment_value(a):
         raise ValueError("A finish assignment no longer has a valid finish.")
     try:
         scale = float(a.get("scale_multiplier", 1))
+        rotation = float(a.get("rotation_deg", 0.0) or 0.0)
+        offset_u = float(a.get("offset_u_in", 0.0) or 0.0)
+        offset_v = float(a.get("offset_v_in", 0.0) or 0.0)
         width = float(finish.get("swatch_width_in", 0))
         height = float(finish.get("swatch_height_in", 0))
     except (ValueError, TypeError):
-        raise ValueError("Finish dimensions and scale must be numbers.")
+        raise ValueError("Finish dimensions, scale, rotation, and offset must be numbers.")
     if not all(math.isfinite(v) if hasattr(math, "isfinite") else not (math.isnan(v) or math.isinf(v))
-               for v in (scale, width, height)) or min(scale, width, height) <= 0:
+               for v in (scale, rotation, offset_u, offset_v, width, height)) or min(scale, width, height) <= 0:
         raise ValueError("Finish dimensions and scale must be finite and greater than zero.")
-    return (str(finish["id"]), scale)
+    return (str(finish["id"]), scale, round(rotation, 4), round(offset_u, 4), round(offset_v, 4))
 
 
 def plan_assignments(scene, assignments):
