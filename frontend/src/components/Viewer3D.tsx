@@ -6,6 +6,7 @@ import type { BBox, CameraPose, SavedCameraView } from "../types";
 export interface ViewerItem {
   id: string;
   name: string;
+  layer: string;
   bbox: BBox;
   finish: {
     url: string;
@@ -116,6 +117,12 @@ export default function Viewer3D({
   const [status, setStatus] = useState<"box" | "loading" | "mesh" | "error">("box");
   const [newViewName, setNewViewName] = useState("");
   const [savingView, setSavingView] = useState(false);
+  const [layerMenuOpen, setLayerMenuOpen] = useState(false);
+  // null means show every layer; an explicit set lets users isolate any combination.
+  const [visibleLayers, setVisibleLayers] = useState<Set<string> | null>(null);
+  const layerNames = [...new Set(items.map((item) => item.layer))].sort((a, b) => a.localeCompare(b));
+  const visibleLayerKey = visibleLayers === null ? "*" : [...visibleLayers].sort().join("|");
+  const shownItems = visibleLayers === null ? items : items.filter((item) => visibleLayers.has(item.layer));
   const selectedKey = [...selected].sort().join("|");
   const onSelectRef = useRef(onSelect);
   onSelectRef.current = onSelect;
@@ -269,9 +276,9 @@ export default function Viewer3D({
       const material = obj.material as THREE.Material | THREE.Material[] | undefined;
       if (Array.isArray(material)) material.forEach((m) => m.dispose()); else material?.dispose();
     }
-    if (!items.length) return;
+    if (!shownItems.length) return;
     const min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
-    for (const item of items) for (let i = 0; i < 3; i++) {
+    for (const item of shownItems) for (let i = 0; i < 3; i++) {
       min[i] = Math.min(min[i], item.bbox.min[i]); max[i] = Math.max(max[i], item.bbox.max[i]);
     }
     // Recenter before converting to float32 so large CAD coordinates retain detail.
@@ -281,7 +288,7 @@ export default function Viewer3D({
     st.radius = radius;
     const geometryById = new Map((geometry?.parts || []).map((part) => [part.id, part]));
     const showBoxes = !geometry;
-    for (const item of items) {
+    for (const item of shownItems) {
       const part = geometryById.get(item.id);
       const isSelected = selected.has(item.id);
       if (part && part.positions.length && part.triangles.length) {
@@ -329,7 +336,7 @@ export default function Viewer3D({
         edges.position.copy(box.position); group.add(edges);
       }
     }
-    const frameKey = `${geometryUrl || "boxes"}:${min.join(",")}:${max.join(",")}:${items.map((i) => i.id).join("|")}`;
+    const frameKey = `${geometryUrl || "boxes"}:${min.join(",")}:${max.join(",")}:${shownItems.map((i) => i.id).join("|")}`;
     if (st.framed !== frameKey) {
       camera.position.set(radius * 1.5, radius * 1.05, -radius * 1.5);
       camera.near = Math.max(radius / 10000, 0.001); camera.far = Math.max(radius * 100, 10000);
@@ -337,7 +344,7 @@ export default function Viewer3D({
       st.framed = frameKey;
       emitCameraPose();
     }
-  }, [items, geometry, geometryUrl, selectedKey]);
+  }, [items, geometry, geometryUrl, selectedKey, visibleLayerKey]);
 
   const label = status === "loading" ? "Loading Rhino geometry… (boxes shown temporarily)"
     : status === "error" ? "Geometry could not be loaded — bounding-box fallback"
@@ -353,6 +360,11 @@ export default function Viewer3D({
             {p}
           </button>
         ))}
+        <button onClick={() => setLayerMenuOpen((open) => !open)}
+          className={`ml-1 rounded border px-2 py-1 ${visibleLayers !== null && visibleLayers.size !== layerNames.length ? "border-amber-500/50 text-amber-300" : "border-zinc-700 text-zinc-300"} hover:bg-zinc-800`}
+          title="Choose which model layers are visible in the preview">
+          Layers {visibleLayers === null ? layerNames.length : visibleLayers.size}/{layerNames.length}
+        </button>
         {onSaveView && (
           <button onClick={() => setSavingView((v) => !v)}
             className="ml-1 rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-amber-300 hover:bg-amber-500/20">
@@ -360,6 +372,33 @@ export default function Viewer3D({
           </button>
         )}
       </div>
+      {layerMenuOpen && (
+        <div className="w-64 rounded-lg border border-zinc-800 bg-zinc-950/95 p-2 text-xs shadow-xl backdrop-blur">
+          <div className="mb-2 flex items-center justify-between border-b border-zinc-800 pb-2">
+            <span className="font-medium text-zinc-200">Preview layers</span>
+            <div className="flex gap-1">
+              <button onClick={() => setVisibleLayers(null)} className="rounded px-1.5 py-1 text-amber-300 hover:bg-zinc-800">All on</button>
+              <button onClick={() => setVisibleLayers(new Set())} className="rounded px-1.5 py-1 text-zinc-400 hover:bg-zinc-800">All off</button>
+            </div>
+          </div>
+          <div className="max-h-56 space-y-0.5 overflow-y-auto">
+            {layerNames.map((name) => {
+              const checked = visibleLayers === null || visibleLayers.has(name);
+              const color = items.find((item) => item.layer === name)?.color || "#71717a";
+              return <label key={name} className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-zinc-300 hover:bg-zinc-900">
+                <input type="checkbox" checked={checked} onChange={() => setVisibleLayers((current) => {
+                  const next = current === null ? new Set(layerNames) : new Set(current);
+                  if (next.has(name)) next.delete(name); else next.add(name);
+                  return next.size === layerNames.length ? null : next;
+                })} className="accent-amber-500" />
+                <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: color }} />
+                <span className="truncate" title={name}>{name}</span>
+              </label>;
+            })}
+            {!layerNames.length && <p className="px-1.5 py-2 text-zinc-500">No preview layers available.</p>}
+          </div>
+        </div>
+      )}
       {savingView && onSaveView && (
         <div className="flex items-center gap-1.5 rounded-lg border border-zinc-700 bg-zinc-950/95 p-1.5 text-xs shadow-lg">
           <input value={newViewName} onChange={(e) => setNewViewName(e.target.value)}

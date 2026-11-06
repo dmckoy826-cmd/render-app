@@ -128,7 +128,7 @@ export default function ModelWorkspace() {
       const conflict = values.size > 1;
       const a = conflict ? undefined : resolved[0];
       return {
-        id: p.id, name: p.name, bbox: p.bbox, rbe: p.requires_block_edit, conflict,
+        id: p.id, name: p.name, layer: p.layer, bbox: p.bbox, rbe: p.requires_block_edit, conflict,
         color: colors.get(p.layer) || "#71717a",
         finish: a?.finish ? {
           url: a.finish.image_url, sw_w: a.finish.swatch_width_in, sw_h: a.finish.swatch_height_in,
