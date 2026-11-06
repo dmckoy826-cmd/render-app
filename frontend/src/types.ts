@@ -79,6 +79,13 @@ export interface Structure {
   geometry_status?: "complete" | "partial";
   preview_schema?: number;
   layer_visibility_schema?: string;
+  preview_layer_geometry?: Array<{
+    layer: string;
+    member_prefix: string;
+    member_count: number;
+    geometry_partial: boolean;
+  }>;
+  geometry_layers_url?: string;
   geometry_warnings?: string[];
   named_views?: string[];
   sku_layers?: SkuLayerInfo[];

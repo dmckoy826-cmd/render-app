@@ -19,6 +19,7 @@ from rhino_scene import scan_document
 MODEL = os.environ["FF_MODEL"]
 OUT_JSON = os.environ["FF_OUT_JSON"]
 OUT_GEOMETRY = os.environ["FF_OUT_GEOMETRY"]
+OUT_GEOMETRY_LAYERS = os.environ.get("FF_OUT_GEOMETRY_LAYERS", "")
 OUT_PNG = os.environ.get("FF_OUT_PNG", "")
 
 
@@ -41,8 +42,14 @@ def main():
     rs.EnableRedraw(True)
     if ok is False:
         raise RuntimeError("Rhino could not open/import: %s" % MODEL)
-    scene = scan_document(include_geometry=True)
+    scene = scan_document(include_geometry=True,
+                          detailed_geometry_archive_path=OUT_GEOMETRY_LAYERS or None)
     structure = scene.structure(os.path.basename(MODEL))
+    if OUT_GEOMETRY_LAYERS and not structure.get("preview_layer_geometry"):
+        try:
+            os.remove(OUT_GEOMETRY_LAYERS)
+        except OSError:
+            pass
     try:
         named_views = [v.Name for v in sc.doc.NamedViews if getattr(v, "Name", None)]
         if named_views:

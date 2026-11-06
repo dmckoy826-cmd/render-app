@@ -33,3 +33,14 @@ def geometry_file_from_url(url: str) -> Path | None:
     if not name or "/" in name or "\\" in name or name in (".", "..") or not name.endswith(".json"):
         return None
     return GEOMETRY_DIR / name
+
+
+def geometry_archive_from_url(url: str) -> Path | None:
+    """Resolve a server-owned per-layer preview archive URL."""
+    prefix = "/media/geometry/"
+    if not isinstance(url, str) or not url.startswith(prefix):
+        return None
+    name = url[len(prefix):]
+    if not name or "/" in name or "\\" in name or name in (".", "..") or not name.endswith(".zip"):
+        return None
+    return GEOMETRY_DIR / name

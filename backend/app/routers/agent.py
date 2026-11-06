@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
 from .. import agentstate, runner
-from ..config import MEDIA_DIR
+from ..config import MEDIA_DIR, geometry_archive_from_url
 from ..db import get_db
 from ..models import Job, ModelDoc, Render
 from .models import job_out
@@ -92,7 +92,7 @@ def heartbeat(body: dict):
     return {"ok": True}
 
 
-def _valid_geometry(data: bytes, struct: dict) -> None:
+def _valid_geometry(data: bytes, struct: dict, allow_duplicate_instances: bool = False) -> None:
     import math
     if len(data) > 100 * 1024 * 1024:
         raise HTTPException(413, "geometry preview is larger than 100 MB")
@@ -113,7 +113,7 @@ def _valid_geometry(data: bytes, struct: dict) -> None:
             if not isinstance(instance_layers, list) or any(not isinstance(value, str) for value in instance_layers):
                 raise ValueError("invalid instance layer paths")
             identity = (key, tuple(instance_layers))
-            if (key not in known or identity in seen or len(positions) % 3 or
+            if (key not in known or (identity in seen and not allow_duplicate_instances) or len(positions) % 3 or
                     len(triangles) % 3 or len(lines) % 2 or
                     any(path not in known_skus for path in instance_layers) or
                     (sku_layer and sku_layer not in known_skus)):
@@ -128,6 +128,68 @@ def _valid_geometry(data: bytes, struct: dict) -> None:
             raise ValueError("missing geometry parts")
     except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
         raise HTTPException(400, f"invalid geometry preview: {exc}") from exc
+
+
+def _valid_geometry_layers(data: bytes, struct: dict) -> None:
+    import hashlib
+    import io
+    import zipfile
+    if len(data) > 100 * 1024 * 1024:
+        raise HTTPException(413, "per-layer preview archive is larger than 100 MB")
+    groups = struct.get("preview_layer_geometry") or []
+    known_skus = {s.get("name") for s in struct.get("sku_layers", []) if s.get("name")}
+    if not isinstance(groups, list):
+        raise HTTPException(400, "invalid per-layer preview index")
+    try:
+        with zipfile.ZipFile(io.BytesIO(data), "r") as archive:
+            infos = archive.infolist()
+            names = [info.filename for info in infos]
+            if (len(names) != len(set(names)) or len(names) > 100000 or
+                    sum(info.file_size for info in infos) > 512 * 1024 * 1024):
+                raise ValueError("layer preview archive has duplicate names or exceeds its expanded-size limit")
+            manifest = json.loads(archive.read("manifest.json"))
+            expected = []
+            allowed_members = {"manifest.json"}
+            for group in groups:
+                if not isinstance(group, dict):
+                    raise ValueError("invalid layer preview index entry")
+                layer = group.get("layer")
+                prefix = group.get("member_prefix")
+                count = group.get("member_count")
+                is_partial = group.get("geometry_partial")
+                if (not isinstance(layer, str) or layer not in known_skus or
+                        not isinstance(prefix, str) or
+                        prefix != "layers/%s/" % hashlib.sha256(layer.encode("utf-8")).hexdigest()[:24] or
+                        isinstance(count, bool) or not isinstance(count, int) or count < 0 or
+                        not isinstance(is_partial, bool) or (count == 0 and not is_partial)):
+                    raise ValueError("invalid layer preview index")
+                members = sorted(name for name in names if name.startswith(prefix))
+                if len(members) != count:
+                    raise ValueError("layer preview members do not match the index")
+                expected.append({"layer": layer, "member_prefix": prefix,
+                                 "member_count": count, "geometry_partial": is_partial})
+                for index, member in enumerate(members):
+                    if member != "%s%08d.json" % (prefix, index):
+                        raise ValueError("invalid layer preview member name")
+                    allowed_members.add(member)
+                    raw = archive.read(member)
+                    # Repeated instances of the same block definition may share
+                    # an object id and placement-layer path but have distinct
+                    # world-space transforms and therefore distinct mesh chunks.
+                    _valid_geometry(raw, struct, allow_duplicate_instances=True)
+                    payload = json.loads(raw)
+                    if len(payload["parts"]) != 1:
+                        raise ValueError("each layer preview member must contain one mesh chunk")
+                    part = payload["parts"][0]
+                    paths = part.get("instance_layers") or []
+                    if not paths or paths[0] != layer:
+                        raise ValueError("layer preview chunk is assigned to the wrong SKU layer")
+            if manifest != expected:
+                raise ValueError("layer preview manifest does not match the structure")
+            if set(names) != allowed_members:
+                raise ValueError("unexpected file in layer preview archive")
+    except (ValueError, TypeError, KeyError, zipfile.BadZipFile, json.JSONDecodeError) as exc:
+        raise HTTPException(400, f"invalid per-layer preview archive: {exc}") from exc
 
 
 def _image_size(data: bytes) -> tuple[int, int]:
@@ -153,6 +215,7 @@ async def complete(job_id: int,
                    manifest: str = Form(None),
                    duration_s: float = Form(None),
                    geometry: UploadFile = None,
+                   geometry_layers: UploadFile = None,
                    files: list[UploadFile] = [],
                    db: Session = Depends(get_db)):
     agentstate.ping()
@@ -172,7 +235,9 @@ async def complete(job_id: int,
             raise HTTPException(400, "analyze jobs must return a nonempty structure JSON")
         # The URL is always generated by this server, never trusted from a worker.
         struct.pop("geometry_url", None)
+        struct.pop("geometry_layers_url", None)
         geom_data = None
+        layer_geometry_data = None
         if struct.get("target_schema") == "rhino-geometry-v1":
             if geometry is None:
                 raise HTTPException(400, "updated Rhino analysis must include its geometry preview")
@@ -180,6 +245,14 @@ async def complete(job_id: int,
             _valid_geometry(geom_data, struct)
         elif geometry is not None:
             raise HTTPException(400, "geometry provided without a supported target schema")
+        detail_groups = struct.get("preview_layer_geometry") or []
+        if detail_groups:
+            if geometry_layers is None:
+                raise HTTPException(400, "updated Rhino analysis must include per-layer preview meshes")
+            layer_geometry_data = await geometry_layers.read(100 * 1024 * 1024 + 1)
+            _valid_geometry_layers(layer_geometry_data, struct)
+        elif geometry_layers is not None:
+            raise HTTPException(400, "per-layer geometry provided without its structure index")
         preview_data = None
         if files:
             if len(files) != 1:
@@ -195,6 +268,10 @@ async def complete(job_id: int,
             (MEDIA_DIR / geom_rel).write_bytes(geom_data)
             struct["geometry_url"] = f"/media/{geom_rel}"
             struct["geometry_api_url"] = f"/api/models/{model.id}/geometry"
+        if layer_geometry_data is not None:
+            layers_rel = f"geometry/{uuid.uuid4().hex}.zip"
+            (MEDIA_DIR / layers_rel).write_bytes(layer_geometry_data)
+            struct["geometry_layers_url"] = f"/media/{layers_rel}"
         runner.apply_analysis(db, model, struct, preview_rel=analyze_preview)
     else:
         try:

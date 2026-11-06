@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+import zipfile
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -64,12 +65,36 @@ class TargetingTests(unittest.TestCase):
         add_part(scene, "same-part", "SHARED", ["SHARED"], source="b", sku_layer="SKU-B")
 
         structure = scene.structure("file.3dm")
-        self.assertEqual(structure["preview_schema"], 4)
-        self.assertEqual(structure["layer_visibility_schema"], "rhino-instance-definition-v2")
+        self.assertEqual(structure["preview_schema"], 5)
+        self.assertEqual(structure["layer_visibility_schema"], "rhino-instance-definition-v3")
         self.assertEqual(structure["parts"][0]["sku_layers"], ["SKU-A", "SKU-B"])
         previews = scene.geometry()["parts"]
         self.assertEqual({p["sku_layer"] for p in previews}, {"SKU-A", "SKU-B"})
         self.assertEqual(len(previews), 2)
+
+    def test_full_budget_preview_meshes_are_isolated_per_sku(self):
+        with tempfile.TemporaryDirectory() as td:
+            archive_path = Path(td) / "layers.zip"
+            with mock.patch.object(common, "MAX_PREVIEW_VERTICES", 3), \
+                    mock.patch.object(common, "MAX_PREVIEW_INDICES", 3):
+                scene = common.SceneBuilder(detailed_geometry_archive_path=str(archive_path))
+                scene.add_block("BLOCK")
+                scene.set_preview_sku_count(2)
+                scene.add_sku_layer("SKU-A", block_name="BLOCK", part_layer="INNER")
+                scene.add_sku_layer("SKU-B", block_name="BLOCK", part_layer="INNER")
+                add_part(scene, "same-part", "BLOCK", ["BLOCK"], source="a", sku_layer="SKU-A")
+                add_part(scene, "same-part", "BLOCK", ["BLOCK"], source="b", sku_layer="SKU-B")
+                scene.close_detailed_geometry()
+                structure = scene.structure("file.3dm")
+            details = {entry["layer"]: entry for entry in structure["preview_layer_geometry"]}
+            self.assertEqual(set(details), {"SKU-A", "SKU-B"})
+            self.assertTrue(all(entry["member_count"] == 1 and not entry["geometry_partial"]
+                                for entry in details.values()))
+            self.assertTrue(structure["geometry_status"] == "partial")
+            with zipfile.ZipFile(str(archive_path)) as archive:
+                for entry in details.values():
+                    mesh_data = json.loads(archive.read(entry["member_prefix"] + "00000000.json"))
+                    self.assertEqual(len(mesh_data["parts"]), 1)
 
     def test_different_block_overrides_rejected_for_shared_definition(self):
         scene = shared_scene()

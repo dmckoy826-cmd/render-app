@@ -33,7 +33,13 @@ interface PreviewPart {
   triangles: number[];
   lines: number[];
 }
-interface PreviewGeometry { version: number; units: string; parts: PreviewPart[] }
+interface PreviewGeometry {
+  version: number;
+  units: string;
+  parts: PreviewPart[];
+  preview_mode?: "single-sku";
+  preview_partial?: boolean;
+}
 interface LayerTreeNode { path: string; label: string; children: LayerTreeNode[] }
 interface Props {
   items: ViewerItem[];
@@ -44,6 +50,7 @@ interface Props {
   partial?: boolean;
   simulatedGeometry?: boolean;
   skuLayerNames?: string[];
+  detailedPreviewLayers?: Array<{ layer: string; geometry_partial: boolean }>;
   skuGeometryReady?: boolean;
   onCameraChange?: (pose: CameraPose) => void;
   savedViews?: SavedCameraView[];
@@ -127,7 +134,7 @@ function meshGeometry(part: PreviewPart, finish: ViewerItem["finish"], origin: n
 /** Rhino model space (x, y, z-up inches) -> Three.js (x, z, -y). */
 export default function Viewer3D({
   items, selected, onSelect, geometryUrl, geometryApiUrl, partial, simulatedGeometry,
-  skuLayerNames = [], skuGeometryReady = false,
+  skuLayerNames = [], detailedPreviewLayers = [], skuGeometryReady = false,
   onCameraChange, savedViews = [], onSaveView, onDeleteView,
 }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
@@ -141,6 +148,7 @@ export default function Viewer3D({
   const [newViewName, setNewViewName] = useState("");
   const [savingView, setSavingView] = useState(false);
   const [layerMenuOpen, setLayerMenuOpen] = useState(false);
+  const [focusedPreviewLayer, setFocusedPreviewLayer] = useState<string | null>(null);
   // Visibility is stored per Rhino-like layer node. A hidden SKU root masks its
   // children without changing their individual on/off state, just like Rhino.
   const [hiddenPreviewLayers, setHiddenPreviewLayers] = useState<Record<string, true>>({});
@@ -260,6 +268,10 @@ export default function Viewer3D({
     const params = new URLSearchParams();
     if (canFilterOnServer) {
       Object.keys(hiddenPreviewLayers).forEach((path) => params.append("hidden_layer", path));
+      if (focusedPreviewLayer && detailedPreviewLayers.some((entry) => entry.layer === focusedPreviewLayer)
+          && isLayerVisible(focusedPreviewLayer)) {
+        params.set("preview_sku_layer", focusedPreviewLayer);
+      }
     }
     const url = params.size ? `${sourceUrl}?${params.toString()}` : sourceUrl;
     const controller = new AbortController();
@@ -274,7 +286,7 @@ export default function Viewer3D({
       setGeometry(data); setStatus("mesh");
     }).catch((err) => { if (err.name !== "AbortError") setStatus("error"); });
     return () => controller.abort();
-  }, [geometryUrl, geometryApiUrl, skuGeometryReady, activeScopeKey, hiddenLayerKey]);
+  }, [geometryUrl, geometryApiUrl, skuGeometryReady, activeScopeKey, hiddenLayerKey, focusedPreviewLayer]);
 
   useEffect(() => {
     const host = hostRef.current!;
@@ -363,6 +375,8 @@ export default function Viewer3D({
       const instanceLayers = Array.isArray(part.instance_layers)
         ? part.instance_layers
         : part.sku_layer ? [part.sku_layer] : [];
+      if (focusedPreviewLayer && !instanceLayers.includes(focusedPreviewLayer)
+          && part.sku_layer !== focusedPreviewLayer) return false;
       if (instanceLayers.length) {
         return instanceLayers.every(isLayerVisible) && isLayerVisible(partLayer);
       }
@@ -456,13 +470,16 @@ export default function Viewer3D({
       st.framed = frameKey;
       emitCameraPose();
     }
-  }, [items, geometry, geometryUrl, selectedKey, activeScopeKey, hiddenLayerKey, skuGeometryReady]);
+  }, [items, geometry, geometryUrl, selectedKey, activeScopeKey, hiddenLayerKey, skuGeometryReady, focusedPreviewLayer]);
 
   const label = noVisibleSelection || shownItems.length === 0 ? "No preview geometry visible — turn on a SKU or part layer"
     : hiddenLayerKey && !skuGeometryReady ? "Re-analyze this model to isolate geometry by SKU layer"
     : status === "loading" ? (geometry ? "Updating Rhino preview…" : "Loading Rhino geometry… (boxes shown temporarily)")
     : status === "error" ? "Geometry could not be loaded — bounding-box fallback"
-    : status === "mesh" ? (simulatedGeometry ? "Synthetic test geometry — not Rhino" : partial ? "Stored Rhino tessellation is partial — see analysis warning" : "Rhino tessellated geometry · finish preview is approximate")
+    : status === "mesh" ? (simulatedGeometry ? "Synthetic test geometry — not Rhino"
+      : geometry?.preview_mode === "single-sku"
+        ? (geometry.preview_partial ? "Single-SKU preview reached its per-layer limit" : "Full-budget single-SKU preview · approximate tessellation")
+        : partial ? "All-layers preview is partial — use Full on one SKU layer" : "Rhino tessellated geometry · finish preview is approximate")
     : "Bounding-box fallback — not actual CAD geometry";
   const renderLayerNode = (node: LayerTreeNode, depth: number): any => {
     const key = node.path;
@@ -472,19 +489,29 @@ export default function Viewer3D({
     const isDefinitionLayer = items.some((item) => item.layer === node.path);
     const role = isInstanceLayer && isDefinitionLayer ? "Instance + geometry"
       : isInstanceLayer ? "Block instance" : isDefinitionLayer ? "Geometry layer" : "Parent layer";
+    const detailInfo = detailedPreviewLayers.find((entry) => entry.layer === key);
+    const focused = focusedPreviewLayer === key;
     return <div key={key}>
-      <label className={`flex items-center gap-2 rounded px-1.5 py-1 ${inheritedOff ? "cursor-not-allowed text-zinc-600" : "cursor-pointer text-zinc-300 hover:bg-zinc-900"}`}
-        style={{ paddingLeft: `${depth * 13 + 6}px` }} title={inheritedOff ? `${node.path} is controlled by a hidden parent` : node.path}>
-        <input type="checkbox" checked={!hiddenPreviewLayers[key]} disabled={inheritedOff}
-          onChange={() => setHiddenPreviewLayers((current) => {
-            const next = { ...current };
-            if (next[key]) delete next[key]; else next[key] = true;
-            return next;
-          })} className="accent-amber-500" />
-        <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: color }} />
-        <span className="min-w-0 flex-1 truncate">{node.label}</span>
-        <span className="shrink-0 text-[9px] text-zinc-600">{role}</span>
-      </label>
+      <div className="flex items-center gap-1" style={{ paddingLeft: `${depth * 13 + 6}px` }}>
+        <label className={`flex min-w-0 flex-1 items-center gap-2 rounded px-1.5 py-1 ${inheritedOff ? "cursor-not-allowed text-zinc-600" : "cursor-pointer text-zinc-300 hover:bg-zinc-900"}`}
+          title={inheritedOff ? `${node.path} is controlled by a hidden parent` : node.path}>
+          <input type="checkbox" checked={!hiddenPreviewLayers[key]} disabled={inheritedOff}
+            onChange={() => setHiddenPreviewLayers((current) => {
+              const next = { ...current };
+              if (next[key]) delete next[key]; else next[key] = true;
+              return next;
+            })} className="accent-amber-500" />
+          <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: color }} />
+          <span className="min-w-0 flex-1 truncate">{node.label}</span>
+          <span className="shrink-0 text-[9px] text-zinc-600">{role}</span>
+        </label>
+        {detailInfo && <button type="button" disabled={!isLayerVisible(key)}
+          onClick={() => setFocusedPreviewLayer(focused ? null : key)}
+          className={`shrink-0 rounded px-1.5 py-1 text-[9px] ${focused ? "bg-amber-500 text-zinc-950" : "text-amber-300 hover:bg-zinc-800"} disabled:cursor-not-allowed disabled:opacity-30`}
+          title={detailInfo.geometry_partial ? "Use this layer's separate preview budget (some geometry may still be omitted)" : "Show this SKU layer using its own preview budget"}>
+          {focused ? "Full ✓" : "Full"}
+        </button>}
+      </div>
       {node.children.map((child) => renderLayerNode(child, depth + 1))}
     </div>;
   };
@@ -523,7 +550,8 @@ export default function Viewer3D({
               <button onClick={() => setHiddenPreviewLayers(Object.fromEntries(allLayerPaths.map((key) => [key, true])) as Record<string, true>)} className="rounded px-1.5 py-1 text-zinc-400 hover:bg-zinc-800">All off</button>
             </div>
           </div>
-          <p className="mb-1 px-1.5 text-[10px] text-zinc-500">Turning off a parent hides its descendants; child check states are preserved.</p>
+          <p className="mb-1 px-1.5 text-[10px] text-zinc-500">Turning off a parent hides descendants. Click “Full” beside one instance layer to load its meshes with a separate budget; other SKUs stay unloaded.</p>
+          {focusedPreviewLayer && <p className="mb-1 truncate px-1.5 text-[10px] text-amber-300">Full preview: {focusedPreviewLayer}</p>}
           <div className="max-h-72 space-y-0.5 overflow-y-auto">
             {layerTree.map((node) => renderLayerNode(node, 0))}
             {!layerTree.length && <p className="px-1.5 py-2 text-zinc-500">No preview layers available.</p>}

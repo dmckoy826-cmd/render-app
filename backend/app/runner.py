@@ -211,6 +211,8 @@ def apply_analysis(db: Session, model: ModelDoc, structure: dict,
     """
     old_geometry = (model.structure or {}).get("geometry_url", "")
     new_geometry = structure.get("geometry_url", "")
+    old_geometry_layers = (model.structure or {}).get("geometry_layers_url", "")
+    new_geometry_layers = structure.get("geometry_layers_url", "")
     model.structure = structure
     model.units = structure.get("units", "inches")
     if preview_rel is None:
@@ -234,6 +236,12 @@ def apply_analysis(db: Session, model: ModelDoc, structure: dict,
     if old_file is not None and old_geometry != new_geometry:
         try:
             old_file.unlink(missing_ok=True)
+        except OSError:
+            pass
+    old_layers_file = config.geometry_archive_from_url(old_geometry_layers)
+    if old_layers_file is not None and old_geometry_layers != new_geometry_layers:
+        try:
+            old_layers_file.unlink(missing_ok=True)
         except OSError:
             pass
 

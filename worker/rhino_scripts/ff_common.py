@@ -9,6 +9,7 @@ from __future__ import division
 import hashlib
 import json
 import math
+import zipfile
 
 SCHEMA = "rhino-geometry-v1"
 MAX_PREVIEW_VERTICES = 1500000
@@ -36,7 +37,7 @@ def union_bbox(a, b):
 
 class SceneBuilder(object):
     """Collect discovered parts and optional model-space preview geometry."""
-    def __init__(self, include_geometry=True):
+    def __init__(self, include_geometry=True, detailed_geometry_archive_path=None):
         self.include_geometry = include_geometry
         self.parts = {}
         self.order = []
@@ -53,9 +54,69 @@ class SceneBuilder(object):
         self.preview_sku_count = 1
         self.vertices_by_sku = {}
         self.indices_by_sku = {}
+        self.detailed_geometry_archive_path = detailed_geometry_archive_path
+        self.detailed_geometry_archive = None
+        self.detailed_geometry_layers = {}
+        self.detailed_vertices_by_layer = {}
+        self.detailed_indices_by_layer = {}
+        if include_geometry and detailed_geometry_archive_path:
+            self.detailed_geometry_archive = zipfile.ZipFile(
+                detailed_geometry_archive_path, "w", zipfile.ZIP_DEFLATED)
 
     def set_preview_sku_count(self, count):
         self.preview_sku_count = max(1, int(count or 1))
+
+    def _add_detailed_geometry(self, key, layer, bbox, positions, triangles, lines,
+                               placement_layers, sku_layer):
+        """Write a full-budget sidecar for one placement layer while scanning.
+
+        These compressed per-layer sidecars let the preview load a single SKU
+        without dividing its mesh budget among unrelated SKUs. The regular
+        geometry payload below remains the bounded all-layers overview.
+        """
+        if self.detailed_geometry_archive is None or not placement_layers:
+            return
+        # A focused SKU is the outermost placement layer. Nested block-layer
+        # paths remain filters within that SKU, not separate product budgets.
+        detail_layer = str(placement_layers[0])
+        vertices = len(positions) // 3
+        indices = len(triangles) + len(lines)
+        used_vertices = self.detailed_vertices_by_layer.get(detail_layer, 0)
+        used_indices = self.detailed_indices_by_layer.get(detail_layer, 0)
+        group = self.detailed_geometry_layers.setdefault(detail_layer, {
+            "member_prefix": "layers/%s/" % hashlib.sha256(detail_layer.encode("utf-8")).hexdigest()[:24],
+            "member_count": 0,
+            "geometry_partial": False,
+        })
+        if (used_vertices + vertices > MAX_PREVIEW_VERTICES or
+                used_indices + indices > MAX_PREVIEW_INDICES):
+            group["geometry_partial"] = True
+            self.partial = True
+            self.warn("A single-layer detailed preview reached its full vertex/index limit; some meshes were omitted for that layer.")
+            return
+        member = "%s%08d.json" % (group["member_prefix"], group["member_count"])
+        part = {"id": key, "layer": layer, "sku_layer": sku_layer or detail_layer,
+                "instance_layers": list(placement_layers), "bbox": bbox,
+                "positions": positions, "triangles": triangles, "lines": lines}
+        payload = {"version": 1, "units": "inches", "parts": [part]}
+        self.detailed_geometry_archive.writestr(
+            member, json.dumps(payload, separators=(",", ":"), allow_nan=False))
+        group["member_count"] += 1
+        self.detailed_vertices_by_layer[detail_layer] = used_vertices + vertices
+        self.detailed_indices_by_layer[detail_layer] = used_indices + indices
+
+    def close_detailed_geometry(self):
+        if self.detailed_geometry_archive is None:
+            return
+        manifest = []
+        for layer, metadata in sorted(self.detailed_geometry_layers.items()):
+            entry = {"layer": layer}
+            entry.update(metadata)
+            manifest.append(entry)
+        self.detailed_geometry_archive.writestr(
+            "manifest.json", json.dumps(manifest, separators=(",", ":")))
+        self.detailed_geometry_archive.close()
+        self.detailed_geometry_archive = None
 
     def warn(self, message):
         if message not in self.warnings:
@@ -136,6 +197,8 @@ class SceneBuilder(object):
         group_key = tuple(placement_layers)
         vertex_count = len(positions) // 3
         index_count = len(triangles) + len(lines)
+        self._add_detailed_geometry(key, layer, bbox, positions, triangles, lines,
+                                    placement_layers, sku_layer)
         sku_vertex_limit = max(1, MAX_PREVIEW_VERTICES // self.preview_sku_count)
         sku_index_limit = max(1, MAX_PREVIEW_INDICES // self.preview_sku_count)
         sku_vertices = self.vertices_by_sku.get(sku_key, 0)
@@ -188,13 +251,20 @@ class SceneBuilder(object):
                       for _, d in sorted(self.sku_layers.items()) if d["part_layers"] or d["blocks"]]
         out = {"units": "inches", "source_file": source_file,
                "analyzer": "rhino8-worker 2.0", "target_schema": SCHEMA,
-               "preview_schema": 4,
-               "layer_visibility_schema": "rhino-instance-definition-v2",
+               "preview_schema": 5,
+               "layer_visibility_schema": "rhino-instance-definition-v3",
                "extents": self.extents, "layers": layers, "blocks": blocks, "parts": parts,
                "geometry_status": "partial" if self.partial else "complete",
                "geometry_warnings": list(self.warnings)}
         if sku_layers:
             out["sku_layers"] = sku_layers
+        if self.detailed_geometry_layers:
+            out["preview_layer_geometry"] = [
+                {"layer": layer, "member_prefix": data["member_prefix"],
+                 "member_count": data["member_count"],
+                 "geometry_partial": data["geometry_partial"]}
+                for layer, data in sorted(self.detailed_geometry_layers.items())
+            ]
         return out
 
     def geometry(self):

@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile
 from sqlalchemy.orm import Session
 
 from .. import automatch, runner
-from ..config import MEDIA_DIR, MODEL_DIR, geometry_file_from_url
+from ..config import MEDIA_DIR, MODEL_DIR, geometry_archive_from_url, geometry_file_from_url
 from ..db import get_db
 from ..models import Assignment, Finish, Job, ModelDoc, Preset, Render
 from ..schemas import AssignmentIn, AutoMatchApplyIn, PresetApplyIn
@@ -161,15 +161,9 @@ def get_model_geometry(model_id: int, request: Request, db: Session = Depends(ge
     if not m:
         raise HTTPException(404, "model not found")
     structure = m.structure or {}
-    path = geometry_file_from_url(structure.get("geometry_url", ""))
-    if path is None or not path.is_file():
-        raise HTTPException(404, "preview geometry not found")
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise HTTPException(500, "preview geometry could not be read") from exc
     sku_filter = set(request.query_params.getlist("sku_layer"))
     layer_filter = set(request.query_params.getlist("layer"))
+    focused_sku = request.query_params.get("preview_sku_layer", "")
     hidden = set()
     legacy_hidden_pairs = set()
     for raw in request.query_params.getlist("hidden_layer"):
@@ -209,6 +203,39 @@ def get_model_geometry(model_id: int, request: Request, db: Session = Depends(ge
                 return False
         return True
 
+    if focused_sku:
+        if not path_is_visible(focused_sku):
+            return {"version": 1, "units": "inches", "parts": [],
+                    "preview_mode": "single-sku", "preview_partial": False}
+        detail = next((group for group in structure.get("preview_layer_geometry", [])
+                       if group.get("layer") == focused_sku), None)
+        archive_path = geometry_archive_from_url(structure.get("geometry_layers_url", ""))
+        if detail is None or archive_path is None or not archive_path.is_file():
+            raise HTTPException(409, "full-budget SKU preview is not available; re-analyze with the updated Rhino worker")
+        try:
+            import zipfile
+            parts = []
+            with zipfile.ZipFile(archive_path, "r") as archive:
+                members = sorted(name for name in archive.namelist()
+                                 if name.startswith(detail["member_prefix"]) and name.endswith(".json"))
+                if len(members) != int(detail.get("member_count", 0)):
+                    raise ValueError("SKU preview archive is incomplete")
+                for member in members:
+                    chunk = json.loads(archive.read(member))
+                    parts.extend(part for part in chunk.get("parts", []) if is_visible(part))
+            return {"version": 1, "units": "inches", "parts": parts,
+                    "preview_mode": "single-sku",
+                    "preview_partial": bool(detail.get("geometry_partial"))}
+        except (OSError, ValueError, KeyError, zipfile.BadZipFile) as exc:
+            raise HTTPException(500, "full-budget SKU preview could not be read") from exc
+
+    path = geometry_file_from_url(structure.get("geometry_url", ""))
+    if path is None or not path.is_file():
+        raise HTTPException(404, "preview geometry not found")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise HTTPException(500, "preview geometry could not be read") from exc
     if sku_filter or layer_filter or hidden:
         payload["parts"] = [part for part in payload.get("parts", []) if is_visible(part)]
     return payload
@@ -235,6 +262,9 @@ def delete_model(model_id: int, db: Session = Depends(get_db)):
         geometry_file = geometry_file_from_url(geometry_url)
         if geometry_file is not None:
             geometry_file.unlink(missing_ok=True)
+        geometry_archive = geometry_archive_from_url((m.structure or {}).get("geometry_layers_url", ""))
+        if geometry_archive is not None:
+            geometry_archive.unlink(missing_ok=True)
     except OSError:
         pass
     db.delete(m)

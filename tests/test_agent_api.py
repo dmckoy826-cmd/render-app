@@ -2,6 +2,8 @@
 import io
 import json
 import os
+import hashlib
+import zipfile
 from pathlib import Path
 import sys
 import tempfile
@@ -120,6 +122,46 @@ class AgentApiTests(unittest.TestCase):
         self.assertEqual([part["instance_layers"] for part in definition_layer_off["parts"]],
                          [["ROOT", "SKU-A::Body"]])
 
+    def test_full_budget_sku_preview_is_served_one_layer_at_a_time(self):
+        model_id, job_id = self.job("analyze")
+        structure_data = structure()
+        structure_data["layer_visibility_schema"] = "rhino-instance-definition-v3"
+        structure_data["sku_layers"] = [
+            {"name": "SKU-A", "part_layers": ["L1"]},
+            {"name": "SKU-B", "part_layers": ["L2"]},
+        ]
+        detail_groups = []
+        archive_data = io.BytesIO()
+        with zipfile.ZipFile(archive_data, "w", zipfile.ZIP_DEFLATED) as archive:
+            manifest = []
+            for layer, definition_layer in (("SKU-A", "L1"), ("SKU-B", "L2")):
+                prefix = "layers/%s/" % hashlib.sha256(layer.encode("utf-8")).hexdigest()[:24]
+                member_count = 2 if layer == "SKU-B" else 1
+                group = {"layer": layer, "member_prefix": prefix, "member_count": member_count,
+                         "geometry_partial": False}
+                detail_groups.append(group)
+                manifest.append(group)
+                for index in range(member_count):
+                    member = prefix + "%08d.json" % index
+                    part = {"id": "p1", "layer": definition_layer, "sku_layer": layer,
+                            "instance_layers": [layer], "positions": [0, 0, 0, 1, 0, 0, 0, 1, 0],
+                            "triangles": [0, 1, 2], "lines": []}
+                    archive.writestr(member, json.dumps({"version": 1, "units": "inches", "parts": [part]}))
+            archive.writestr("manifest.json", json.dumps(manifest))
+        structure_data["preview_layer_geometry"] = detail_groups
+        response = self.client.post(f"/api/agent/jobs/{job_id}/complete",
+            data={"structure": json.dumps(structure_data)},
+            files=[("geometry", ("geometry.json", json.dumps(geometry()), "application/json")),
+                   ("geometry_layers", ("geometry_layers.zip", archive_data.getvalue(), "application/zip"))])
+        self.assertEqual(response.status_code, 200, response.text)
+        saved = self.client.get(f"/api/models/{model_id}").json()["structure"]
+        detailed = self.client.get(saved["geometry_api_url"], params={
+            "preview_sku_layer": "SKU-B", "hidden_layer": "SKU-A"}).json()
+        self.assertEqual(detailed["preview_mode"], "single-sku")
+        self.assertFalse(detailed["preview_partial"])
+        self.assertEqual([(part["sku_layer"], part["layer"]) for part in detailed["parts"]],
+                         [("SKU-B", "L2"), ("SKU-B", "L2")])
+
     def test_analysis_requires_valid_geometry_and_rejects_bad_indices(self):
         _, job_id = self.job("analyze")
         r = self.client.post(f"/api/agent/jobs/{job_id}/complete", data={"structure": json.dumps(structure())})
@@ -215,23 +257,45 @@ class AgentApiTests(unittest.TestCase):
 
     def test_old_geometry_is_removed_after_reanalysis(self):
         model_id, first_id = self.job("analyze")
-        fields = {"structure": json.dumps(structure())}
+        structure_data = structure()
+        layer = "SKU-A"
+        prefix = "layers/%s/" % hashlib.sha256(layer.encode("utf-8")).hexdigest()[:24]
+        group = {"layer": layer, "member_prefix": prefix, "member_count": 1,
+                 "geometry_partial": False}
+        structure_data.update({"layer_visibility_schema": "rhino-instance-definition-v3",
+                               "sku_layers": [{"name": layer}],
+                               "preview_layer_geometry": [group]})
+        archive_bytes = io.BytesIO()
+        with zipfile.ZipFile(archive_bytes, "w", zipfile.ZIP_DEFLATED) as archive:
+            part = {"id": "p1", "layer": "L1", "sku_layer": layer,
+                    "instance_layers": [layer], "positions": [0, 0, 0, 1, 0, 0, 0, 1, 0],
+                    "triangles": [0, 1, 2], "lines": []}
+            archive.writestr(prefix + "00000000.json", json.dumps({"version": 1, "units": "inches", "parts": [part]}))
+            archive.writestr("manifest.json", json.dumps([group]))
+        fields = {"structure": json.dumps(structure_data)}
         files = lambda: [("geometry", ("geometry.json", json.dumps(geometry()), "application/json")),
+                         ("geometry_layers", ("geometry_layers.zip", archive_bytes.getvalue(), "application/zip")),
                          ("files", ("preview.png", png(), "image/png"))]
         first = self.client.post(f"/api/agent/jobs/{first_id}/complete", data=fields, files=files())
         self.assertEqual(first.status_code, 200, first.text)
-        old_url = self.client.get(f"/api/models/{model_id}").json()["structure"]["geometry_url"]
+        saved = self.client.get(f"/api/models/{model_id}").json()["structure"]
+        old_url, old_layers_url = saved["geometry_url"], saved["geometry_layers_url"]
         with SessionLocal() as db:
             next_job = Job(kind="analyze", model_id=model_id, status="running", runner="agent", settings={})
             db.add(next_job); db.commit(); db.refresh(next_job); second_id = next_job.id
         second = self.client.post(f"/api/agent/jobs/{second_id}/complete", data=fields, files=files())
         self.assertEqual(second.status_code, 200, second.text)
-        new_url = self.client.get(f"/api/models/{model_id}").json()["structure"]["geometry_url"]
+        saved = self.client.get(f"/api/models/{model_id}").json()["structure"]
+        new_url, new_layers_url = saved["geometry_url"], saved["geometry_layers_url"]
         self.assertNotEqual(old_url, new_url)
+        self.assertNotEqual(old_layers_url, new_layers_url)
         self.assertEqual(self.client.get(old_url).status_code, 404)
+        self.assertEqual(self.client.get(old_layers_url).status_code, 404)
         self.assertEqual(self.client.get(new_url).status_code, 200)
+        self.assertEqual(self.client.get(new_layers_url).status_code, 200)
         self.assertEqual(self.client.delete(f"/api/models/{model_id}").status_code, 200)
         self.assertEqual(self.client.get(new_url).status_code, 404)
+        self.assertEqual(self.client.get(new_layers_url).status_code, 404)
 
     def test_manual_targets_and_part_presets_use_stable_ids(self):
         model_id, _ = self.job("analyze", status="done")

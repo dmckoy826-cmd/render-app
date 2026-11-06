@@ -162,8 +162,8 @@ def preview_geometry(geometry, kind, factor):
     return positions, triangles, lines
 
 
-def scan_document(include_geometry=True):
-    builder = SceneBuilder(include_geometry)
+def scan_document(include_geometry=True, detailed_geometry_archive_path=None):
+    builder = SceneBuilder(include_geometry, detailed_geometry_archive_path)
     if str(sc.doc.ModelUnitSystem).lower() in ("none", "unset", "customunits"):
         raise ValueError("The drawing has no supported model units. Set units in Rhino first.")
     factor = Rhino.RhinoMath.UnitScale(sc.doc.ModelUnitSystem, Rhino.UnitSystem.Inches)
@@ -262,4 +262,5 @@ def scan_document(include_geometry=True):
     for obj in top_objects:
         if obj is not None:
             visit(obj, Rhino.Geometry.Transform.Identity, [], [])
+    builder.close_detailed_geometry()
     return builder

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import ExitStack
 import subprocess
 import struct
 import sys
@@ -188,10 +189,12 @@ def do_analyze(job: dict, model: dict) -> None:
         out_json = td / "structure.json"
         out_png = td / "preview.png"
         out_geometry = td / "geometry.json"
+        out_geometry_layers = td / "geometry_layers.zip"
         progress(job["id"], 10, "Worker: importing model")
         console = run_rhino(HERE / "rhino_scripts" / "analyze_model.py", {
             "FF_MODEL": str(model_path), "FF_OUT_JSON": str(out_json),
             "FF_OUT_PNG": str(out_png), "FF_OUT_GEOMETRY": str(out_geometry),
+            "FF_OUT_GEOMETRY_LAYERS": str(out_geometry_layers),
         }, job_id=job["id"])
         error = Path(str(out_json) + ".error.txt")
         if error.exists() or not out_json.exists():
@@ -200,16 +203,17 @@ def do_analyze(job: dict, model: dict) -> None:
         if structure.get("target_schema") != "rhino-geometry-v1" or not out_geometry.is_file():
             raise RuntimeError("Rhino analysis did not produce the expected structure and geometry preview.")
         progress(job["id"], 90, "Uploading structure and geometry")
-        with open(out_geometry, "rb") as geometry:
+        with ExitStack() as stack:
+            geometry = stack.enter_context(open(out_geometry, "rb"))
             files = [("geometry", ("geometry.json", geometry, "application/json"))]
+            if out_geometry_layers.is_file():
+                layer_geometry = stack.enter_context(open(out_geometry_layers, "rb"))
+                files.append(("geometry_layers", ("geometry_layers.zip", layer_geometry, "application/zip")))
             if out_png.exists():
-                with open(out_png, "rb") as preview:
-                    files.append(("files", ("preview.png", preview, "image/png")))
-                    r = requests.post(f"{API}/api/agent/jobs/{job['id']}/complete",
-                                      data={"structure": json.dumps(structure)}, files=files, timeout=300)
-            else:
-                r = requests.post(f"{API}/api/agent/jobs/{job['id']}/complete",
-                                  data={"structure": json.dumps(structure)}, files=files, timeout=300)
+                preview = stack.enter_context(open(out_png, "rb"))
+                files.append(("files", ("preview.png", preview, "image/png")))
+            r = requests.post(f"{API}/api/agent/jobs/{job['id']}/complete",
+                              data={"structure": json.dumps(structure)}, files=files, timeout=600)
         r.raise_for_status()
 
 
