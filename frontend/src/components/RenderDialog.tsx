@@ -185,6 +185,11 @@ export default function RenderDialog({
     setJob(null);
     setBusy(false);
     setSelectedSkus(new Set(availableSkus));
+    if (skuLayers.length > 1) {
+      setSingleIsolateSku((prev) =>
+        prev && skuLayers.some((s) => s.name === prev) ? prev : skuLayers[0].name
+      );
+    }
     if (switchableTargets.length > 0) {
       setVaryingTarget((prev) =>
         prev && switchableTargets.some((t) => t.spec === prev)
@@ -422,6 +427,7 @@ export default function RenderDialog({
         batchPayload = {
           output_dir: outputDir.trim(),
           sku_layers: skuList,
+          all_sku_layers: availableSkus,
           base_assignments,
           variations,
         };

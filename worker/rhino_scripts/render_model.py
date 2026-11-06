@@ -512,11 +512,14 @@ def apply_target_finish(assignment, mat_info, mapped_ids, target_index=None):
 
     for obj in matched_objs:
         try:
-            cur_src = obj.Attributes.MaterialSource
-            cur_idx = obj.Attributes.MaterialIndex
+            # Always fetch the live RhinoObject by Id for top-level objects so we never
+            # overwrite current visibility (IsHidden) with a stale Attributes snapshot.
+            live_obj = sc.doc.Objects.FindId(obj.Id) or obj
+            cur_src = live_obj.Attributes.MaterialSource
+            cur_idx = live_obj.Attributes.MaterialIndex
             if (cur_src != Rhino.DocObjects.ObjectMaterialSource.MaterialFromObject or
                     cur_idx != material_index):
-                attr = obj.Attributes.Duplicate()
+                attr = live_obj.Attributes.Duplicate()
                 attr.MaterialSource = Rhino.DocObjects.ObjectMaterialSource.MaterialFromObject
                 attr.MaterialIndex = material_index
                 if render_mat is not None:
@@ -524,24 +527,25 @@ def apply_target_finish(assignment, mat_info, mapped_ids, target_index=None):
                         attr.RenderMaterial = render_mat
                     except Exception:
                         pass
-                if not sc.doc.Objects.ModifyAttributes(obj, attr, True):
-                    obj.Attributes.MaterialSource = Rhino.DocObjects.ObjectMaterialSource.MaterialFromObject
-                    obj.Attributes.MaterialIndex = material_index
+                if not sc.doc.Objects.ModifyAttributes(live_obj, attr, True):
+                    live_obj.Attributes.MaterialSource = Rhino.DocObjects.ObjectMaterialSource.MaterialFromObject
+                    live_obj.Attributes.MaterialIndex = material_index
                     if render_mat is not None:
                         try:
-                            obj.Attributes.RenderMaterial = render_mat
+                            live_obj.Attributes.RenderMaterial = render_mat
                         except Exception:
                             pass
-                    obj.CommitChanges()
+                    live_obj.CommitChanges()
         except Exception:
             pass
         oid_key = str(obj.Id)
         if mapped_ids.get(oid_key) != mapping_token:
             try:
-                mapping = mapping_for(obj, sw_w, sw_h, rotation_deg=rot,
+                live_obj = sc.doc.Objects.FindId(obj.Id) or obj
+                mapping = mapping_for(live_obj, sw_w, sw_h, rotation_deg=rot,
                                       offset_u_in=off_u, offset_v_in=off_v, relaxed=True)
                 if mapping is not None:
-                    sc.doc.Objects.ModifyTextureMapping(obj.Id, 1, mapping)
+                    sc.doc.Objects.ModifyTextureMapping(live_obj.Id, 1, mapping)
                     mapped_ids[oid_key] = mapping_token
             except Exception:
                 pass
@@ -560,85 +564,153 @@ def isolate_sku_layer(target_sku, all_sku_layers, target_index=None):
     def is_ancestor(layer_path, sku_name):
         return sku_name.startswith(layer_path + "::")
 
-    other_indices = set()
-    target_indices = set()
+    all_layers = [l for l in sc.doc.Layers if not l.IsDeleted]
+    layer_by_id = {l.Id: l for l in all_layers}
+
+    def ancestor_indices_of(layer):
+        out = set()
+        pid = getattr(layer, "ParentLayerId", System.Guid.Empty)
+        while pid and pid != System.Guid.Empty and pid in layer_by_id:
+            parent = layer_by_id[pid]
+            out.add(parent.Index)
+            pid = getattr(parent, "ParentLayerId", System.Guid.Empty)
+        return out
+
+    other_seed_indices = set()
+    target_seed_indices = set()
     first_target_idx = None
 
-    for layer in sc.doc.Layers:
-        if layer.IsDeleted:
-            continue
+    for layer in all_layers:
         full = layer.FullPath or layer.Name or ""
         short = layer.Name or ""
-        if is_same_or_child(full, short, target_sku) or is_ancestor(full, target_sku):
-            target_indices.add(layer.Index)
-            if first_target_idx is None and is_same_or_child(full, short, target_sku):
+        if is_same_or_child(full, short, target_sku):
+            target_seed_indices.add(layer.Index)
+            if first_target_idx is None:
                 first_target_idx = layer.Index
         elif any(is_same_or_child(full, short, o) for o in other_skus):
+            other_seed_indices.add(layer.Index)
+
+    # Expand descendants (any layer whose ancestor is in target_seed or other_seed)
+    target_indices = set(target_seed_indices)
+    other_indices = set(other_seed_indices)
+    for layer in all_layers:
+        anc = ancestor_indices_of(layer)
+        if anc & target_seed_indices:
+            target_indices.add(layer.Index)
+        elif anc & other_seed_indices:
             other_indices.add(layer.Index)
+
+    # Also include ancestors of target_sku so target_sku can be visible in Rhino
+    for layer in list(all_layers):
+        if layer.Index in target_indices:
+            target_indices |= ancestor_indices_of(layer)
+
+    other_indices -= target_indices
+
+    def get_all_doc_objects():
+        enum_settings = Rhino.DocObjects.ObjectEnumeratorSettings()
+        enum_settings.NormalObjects = True
+        enum_settings.HiddenObjects = True
+        enum_settings.LockedObjects = True
+        try:
+            enum_settings.VisibleFilter = False
+        except Exception:
+            pass
+        objs = list(sc.doc.Objects.GetObjectList(enum_settings) or [])
+        if not objs:
+            for oid in rs.AllObjects(select=False, include_lights=False, include_grips=False) or []:
+                o = sc.doc.Objects.FindId(oid)
+                if o is not None:
+                    objs.append(o)
+        return objs
 
     rs.EnableRedraw(False)
     try:
-        # Rhino cannot turn off the CurrentLayer! Always make target_sku current first.
-        if first_target_idx is not None:
+        # 1. Turn ON target_indices from top-level parent down to child layers first
+        target_sorted = sorted(
+            [l for l in all_layers if l.Index in target_indices],
+            key=lambda l: (l.FullPath or l.Name or "").count("::"),
+        )
+        for layer in target_sorted:
+            full = layer.FullPath or layer.Name or ""
             try:
-                sc.doc.Layers[first_target_idx].IsVisible = True
-                sc.doc.Layers.Modify(sc.doc.Layers[first_target_idx], first_target_idx, False)
-                sc.doc.Layers.SetCurrentLayerIndex(first_target_idx, True)
+                if hasattr(sc.doc.Layers, "ForceLayerVisible"):
+                    sc.doc.Layers.ForceLayerVisible(layer.Id)
+            except Exception:
+                pass
+            try:
+                layer.IsVisible = True
+                if hasattr(layer, "SetPersistentVisibility"):
+                    layer.SetPersistentVisibility(True)
+                sc.doc.Layers.Modify(layer, layer.Index, True)
+            except Exception:
+                pass
+            try:
+                rs.LayerVisible(full, True)
             except Exception:
                 pass
 
-        for layer in sc.doc.Layers:
-            if layer.IsDeleted:
-                continue
-            full = layer.FullPath or layer.Name or ""
-            if layer.Index in target_indices:
-                if not layer.IsVisible:
+        # 2. Ensure Rhino's CurrentLayerIndex is NEVER one of other_indices
+        if first_target_idx is not None:
+            try:
+                sc.doc.Layers.SetCurrentLayerIndex(first_target_idx, True)
+            except Exception:
+                pass
+        if sc.doc.Layers.CurrentLayerIndex in other_indices:
+            for layer in all_layers:
+                if layer.Index not in other_indices:
                     try:
                         layer.IsVisible = True
-                        if hasattr(layer, "SetPersistentVisibility"):
-                            layer.SetPersistentVisibility(True)
-                        sc.doc.Layers.Modify(layer, layer.Index, False)
-                        rs.LayerVisible(full, True)
-                    except Exception:
-                        pass
-            elif layer.Index in other_indices:
-                if layer.IsVisible:
-                    try:
-                        layer.IsVisible = False
-                        if hasattr(layer, "SetPersistentVisibility"):
-                            layer.SetPersistentVisibility(False)
-                        sc.doc.Layers.Modify(layer, layer.Index, False)
-                        rs.LayerVisible(full, False)
-                    except Exception:
-                        pass
-            else:
-                if not layer.IsVisible:
-                    try:
-                        layer.IsVisible = True
-                        sc.doc.Layers.Modify(layer, layer.Index, False)
+                        sc.doc.Layers.Modify(layer, layer.Index, True)
+                        if sc.doc.Layers.SetCurrentLayerIndex(layer.Index, True):
+                            break
                     except Exception:
                         pass
 
-        top_objs = target_index["top_objs"] if target_index else None
-        if top_objs is None:
-            enum_settings = Rhino.DocObjects.ObjectEnumeratorSettings()
-            enum_settings.NormalObjects = True
-            enum_settings.HiddenObjects = True
-            enum_settings.LockedObjects = False
-            top_objs = sc.doc.Objects.GetObjectList(enum_settings) or []
-
-        for obj in top_objs:
+        # 3. Explicitly Show objects on target_indices and Hide objects on other_indices
+        # BEFORE turning off other_indices layers (and with VisibleFilter=False) so Rhino's
+        # object enumerator never skips objects on hidden layers.
+        fresh_top_objs = get_all_doc_objects()
+        hidden_cnt = 0
+        shown_cnt = 0
+        for obj in fresh_top_objs:
             if obj is None or obj.ObjectType == Rhino.DocObjects.ObjectType.Light:
                 continue
             lidx = obj.Attributes.LayerIndex
             if lidx in target_indices:
-                if obj.IsHidden:
-                    sc.doc.Objects.Show(obj.Id, True)
+                sc.doc.Objects.Show(obj.Id, True)
+                shown_cnt += 1
             elif lidx in other_indices:
-                if not obj.IsHidden:
-                    sc.doc.Objects.Hide(obj.Id, True)
+                sc.doc.Objects.Hide(obj.Id, True)
+                hidden_cnt += 1
+
+        # 4. Unconditionally turn OFF all other SKU layers (children first, then parents)
+        other_sorted = sorted(
+            [l for l in all_layers if l.Index in other_indices],
+            key=lambda l: (l.FullPath or l.Name or "").count("::"),
+            reverse=True,
+        )
+        for layer in other_sorted:
+            full = layer.FullPath or layer.Name or ""
+            try:
+                layer.IsVisible = False
+                if hasattr(layer, "SetPersistentVisibility"):
+                    layer.SetPersistentVisibility(False)
+                sc.doc.Layers.Modify(layer, layer.Index, True)
+            except Exception:
+                pass
+            try:
+                rs.LayerVisible(full, False)
+            except Exception:
+                pass
+
+        print(
+            "ISOLATE_SKU target=%s target_layers=%d other_sku_layers=%d shown_objs=%d hidden_objs=%d"
+            % (target_sku, len(target_indices), len(other_indices), shown_cnt, hidden_cnt)
+        )
     finally:
         rs.EnableRedraw(True)
+    sc.doc.Views.Redraw()
 
 
 def configure_vray_acceleration(vray):
@@ -776,10 +848,32 @@ def configure_camera_and_output(vray, out_dir, out_filename):
         pass
 
 
-def run_batch(batch_cfg, renderer, vray):
+def run_batch(batch_cfg, renderer, vray, structure=None):
     output_dir = os.path.abspath(batch_cfg.get("output_dir") or OUT_DIR)
     sku_layers = batch_cfg.get("sku_layers") or []
-    all_sku_layers = batch_cfg.get("all_sku_layers") or sku_layers
+    struct_skus = [s["name"] for s in (structure or {}).get("sku_layers", []) if s.get("name")]
+    # Also detect any layer in the live Rhino doc that holds top-level block instances
+    doc_instance_layers = []
+    try:
+        enum_s = Rhino.DocObjects.ObjectEnumeratorSettings()
+        enum_s.NormalObjects = True
+        enum_s.HiddenObjects = True
+        enum_s.LockedObjects = True
+        for obj in sc.doc.Objects.GetObjectList(enum_s) or []:
+            if isinstance(obj, Rhino.DocObjects.InstanceObject):
+                lyr = sc.doc.Layers[obj.Attributes.LayerIndex]
+                if lyr and not lyr.IsDeleted:
+                    lname = lyr.FullPath or lyr.Name or ""
+                    if lname:
+                        doc_instance_layers.append(lname)
+    except Exception:
+        pass
+    all_sku_layers = list(
+        set(batch_cfg.get("all_sku_layers") or [])
+        | set(sku_layers)
+        | set(struct_skus)
+        | set(doc_instance_layers)
+    )
     base_assignments = batch_cfg.get("base_assignments") or []
     variations = batch_cfg.get("variations") or []
     if not sku_layers:
@@ -863,6 +957,9 @@ def run_batch(batch_cfg, renderer, vray):
             finally:
                 rs.EnableRedraw(True)
 
+            # Re-verify SKU isolation right after finish assignments before rendering
+            isolate_sku_layer(sku_layer, all_sku_layers, target_index=target_index)
+
             png_name = sanitize_filename(label) + ".png"
             dest_png = os.path.join(sku_dir, png_name)
             if os.path.exists(dest_png):
@@ -918,7 +1015,7 @@ def main():
             batch_cfg = json.load(bfh)
         renderer = ensure_vray()
         vray = vray_wrapper()
-        run_batch(batch_cfg, renderer, vray)
+        run_batch(batch_cfg, renderer, vray, structure=structure)
         return
     if not rs.AllObjects():
         raise RuntimeError("Rhino could not import %s." % MODEL)
