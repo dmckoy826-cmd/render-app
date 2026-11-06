@@ -124,17 +124,10 @@ def mapping_for(obj, sw_w, sw_h):
         raise RuntimeError("Unknown model units; cannot establish real-world texture size.")
     w, h = sw_w / inches_per_unit, sw_h / inches_per_unit
     interval = Rhino.Geometry.Interval
-    plane = planar_mapping(obj.Geometry)
-    if plane is not None:
-        mapping = Rhino.Render.TextureMapping.CreatePlaneMapping(
-            plane, interval(0, w), interval(0, h), interval(0, max(w, h)))
-    elif abs(sw_w - sw_h) <= max(sw_w, sw_h) * 1e-7:
-        # A single box mapping preserves the same square tile on each box face.
-        mapping = Rhino.Render.TextureMapping.CreateBoxMapping(
-            Rhino.Geometry.Plane.WorldXY, interval(0, w), interval(0, w), interval(0, w), True)
-    else:
-        raise RuntimeError("Rectangular swatches on multi-face objects cannot yet be mapped "
-                           "at a verified physical scale. Use a planar surface or a square swatch.")
+    # Requirement: Every finish should have their "Type" setting in Rhino Texture mapping set to "Box"
+    # We create BoxMapping for all finishes, independent of planar geometry or square swatches.
+    mapping = Rhino.Render.TextureMapping.CreateBoxMapping(
+        Rhino.Geometry.Plane.WorldXY, interval(0, w), interval(0, h), interval(0, max(w, h)), True)
     if mapping is None:
         raise RuntimeError("Rhino could not create the real-world texture mapping.")
     return mapping
@@ -177,9 +170,10 @@ def assign_object(oid, material_index, assignment):
     if obj is None or rs.IsObjectLocked(oid):
         raise RuntimeError("A target object is missing or locked; no render was produced.")
     f = assignment["finish"]
-    mult = float(assignment.get("scale_multiplier", 1))
-    mapping = mapping_for(obj, float(f["swatch_width_in"]) * mult,
-                          float(f["swatch_height_in"]) * mult)
+    width_mult = float(assignment.get("scale_width", 1))
+    height_mult = float(assignment.get("scale_height", 1))
+    mapping = mapping_for(obj, float(f["swatch_width_in"]) * width_mult,
+                          float(f["swatch_height_in"]) * height_mult)
     rs.ObjectMaterialSource(oid, 1)
     rs.ObjectMaterialIndex(oid, material_index)
     if rs.ObjectMaterialSource(oid) != 1 or rs.ObjectMaterialIndex(oid) != material_index:
@@ -302,7 +296,10 @@ def main():
     mats_by_finish, materials = {}, {}
     for key, assignment in plan.items():
         f = assignment["finish"]
-        token = (f["id"], float(assignment.get("scale_multiplier", 1)))
+        # Independent scaling: width and height
+        w_mult = float(assignment.get("scale_width", 1))
+        h_mult = float(assignment.get("scale_height", 1))
+        token = (f["id"], w_mult, h_mult)
         if token not in mats_by_finish:
             mats_by_finish[token] = make_material(assignment)
         materials[key] = mats_by_finish[token]

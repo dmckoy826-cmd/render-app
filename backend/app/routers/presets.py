@@ -95,7 +95,7 @@ def preset_from_model(body: PresetFromModelIn, db: Session = Depends(get_db)):
         target_property = "identity" if kind == "part" and stable else "name"
         rules.append({"match": "exact", "pattern": a.target_name, "finish_id": a.finish_id,
                       "target_kind": kind, "target_property": target_property,
-                      "scale_multiplier": a.scale_multiplier})
+                      "scale_width": a.scale_width, "scale_height": a.scale_height})
     p = Preset(name=body.name.strip() or f"{m.name} preset",
                description=body.description or f"Saved from model '{m.name}'", rules=rules)
     db.add(p)

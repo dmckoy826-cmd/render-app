@@ -62,8 +62,9 @@ class Assignment(Base):
     target_kind: Mapped[str] = mapped_column(String(20), default="layer")
     target_name: Mapped[str] = mapped_column(String(300))
     finish_id: Mapped[int] = mapped_column(ForeignKey("finishes.id"))
-    # Optional per-target scale multiplier (1.0 = use finish's real-world swatch size)
-    scale_multiplier: Mapped[float] = mapped_column(Float, default=1.0)
+    # Optional per-target scale multipliers (1.0 = use finish's real-world swatch size)
+    scale_width: Mapped[float] = mapped_column(Float, default=1.0)
+    scale_height: Mapped[float] = mapped_column(Float, default=1.0)
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

@@ -80,7 +80,8 @@ export interface Assignment {
   target_kind: "layer" | "block" | "part";
   target_name: string;
   finish_id: number;
-  scale_multiplier: number;
+  scale_width: number;
+  scale_height: number;
   finish: Finish | null;
 }
 
@@ -136,7 +137,8 @@ export interface PresetRule {
   finish_id: number;
   target_kind: "layer" | "block" | "part";
   target_property?: "name" | "identity";
-  scale_multiplier?: number;
+  scale_width?: number;
+  scale_height?: number;
   finish_name?: string;
   finish_thumb?: string;
 }

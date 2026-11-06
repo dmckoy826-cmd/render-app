@@ -49,7 +49,8 @@ def assignment_out(a: Assignment, db: Session) -> dict:
         "target_kind": a.target_kind,
         "target_name": a.target_name,
         "finish_id": a.finish_id,
-        "scale_multiplier": a.scale_multiplier,
+        "scale_width": a.scale_width,
+        "scale_height": a.scale_height,
         "finish": finish_out(f) if f else None,
     }
 
@@ -184,7 +185,7 @@ def set_assignment(model_id: int, body: AssignmentIn, db: Session = Depends(get_
         if body.target_name not in valid:
             raise HTTPException(409, "Target is missing or stale; re-analyze and select a current target.")
         runner.upsert_assignment(db, model_id, body.target_kind, body.target_name,
-                                 body.finish_id, body.scale_multiplier)
+                                 body.finish_id, body.scale_width, body.scale_height)
     rows = db.query(Assignment).filter(Assignment.model_id == model_id).all()
     return [assignment_out(a, db) for a in rows]
 
@@ -271,7 +272,7 @@ def apply_preset(model_id: int, preset_id: int, body: PresetApplyIn,
                 hit = False
             if hit and db.get(Finish, rule.get("finish_id")):
                 runner.upsert_assignment(db, model_id, kind, target, rule["finish_id"],
-                                         rule.get("scale_multiplier", 1.0))
+                                         rule.get("scale_width", 1.0), rule.get("scale_height", 1.0))
                 matches.append({"target_kind": kind, "target_name": target,
                                 "finish_id": rule["finish_id"]})
                 break

@@ -8,7 +8,8 @@ class AssignmentIn(BaseModel):
     target_kind: str = Field(pattern="^(layer|block|part)$")
     target_name: str
     finish_id: Optional[int] = None  # None removes the assignment
-    scale_multiplier: float = Field(default=1.0, gt=0, allow_inf_nan=False)
+    scale_width: float = Field(default=1.0, gt=0, allow_inf_nan=False)
+    scale_height: float = Field(default=1.0, gt=0, allow_inf_nan=False)
 
 
 class AutoMatchApplyIn(BaseModel):
@@ -22,7 +23,8 @@ class PresetRuleIn(BaseModel):
     finish_id: int
     target_kind: str = Field(default="layer", pattern="^(layer|block|part)$")
     target_property: str = Field(default="name", pattern="^(name|identity)$")
-    scale_multiplier: float = Field(default=1.0, gt=0, allow_inf_nan=False)
+    scale_width: float = Field(default=1.0, gt=0, allow_inf_nan=False)
+    scale_height: float = Field(default=1.0, gt=0, allow_inf_nan=False)
 
     @model_validator(mode="after")
     def identity_is_exact_part(self):

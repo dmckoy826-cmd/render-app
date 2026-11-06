@@ -22,6 +22,24 @@ function AssignmentScale({ value, onSave }: { value: number; onSave: (n: number)
   </label>;
 }
 
+function AssignmentScalePair({ width, height, onSave }: { width: number; height: number; onSave: (w: number, h: number) => void }) {
+  const [draftW, setDraftW] = useState(String(width));
+  const [draftH, setDraftH] = useState(String(height));
+  useEffect(() => { setDraftW(String(width)); setDraftH(String(height)); }, [width, height]);
+  return <div className="flex items-center gap-2 text-[10px] text-zinc-500" title="Texture size multipliers: width and height can differ">
+    <span className="shrink-0">W ×</span>
+    <input type="number" min="0.01" step="0.1" value={draftW} aria-label="Width multiplier"
+      onChange={(e) => setDraftW(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
+      onBlur={() => { const n = Number(draftW); if (!Number.isFinite(n) || n <= 0) setDraftW(String(width)); else if (n !== width) onSave(n, height); }}
+      className="w-10 rounded border border-zinc-700 bg-zinc-950 px-1 py-1 text-xs text-zinc-300" />
+    <span className="shrink-0">H ×</span>
+    <input type="number" min="0.01" step="0.1" value={draftH} aria-label="Height multiplier"
+      onChange={(e) => setDraftH(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
+      onBlur={() => { const n = Number(draftH); if (!Number.isFinite(n) || n <= 0) setDraftH(String(height)); else if (n !== height) onSave(width, n); }}
+      className="w-10 rounded border border-zinc-700 bg-zinc-950 px-1 py-1 text-xs text-zinc-300" />
+  </div>;
+}
+
 export default function ModelWorkspace() {
   const { id } = useParams();
   const modelId = Number(id);
@@ -39,10 +57,10 @@ export default function ModelWorkspace() {
   const [partSearch, setPartSearch] = useState("");
   const [partLimit, setPartLimit] = useState(100);
 
-  const assign = async (t: Target, finishId: number | null, scale = 1) => {
+  const assign = async (t: Target, finishId: number | null, width = 1, height = 1) => {
     try {
       await api.post(`/api/models/${modelId}/assignments`, {
-        target_kind: t.kind, target_name: t.name, finish_id: finishId, scale_multiplier: scale,
+        target_kind: t.kind, target_name: t.name, finish_id: finishId, scale_width: width, scale_height: height,
       });
       await refresh();
     } catch (e) {
@@ -60,7 +78,7 @@ export default function ModelWorkspace() {
       const direct = byKind.part.get(stableTargets ? p.id : p.name);
       const paths = p.block_paths?.length ? p.block_paths : [p.block ? [p.block] : []];
       const resolved = paths.map((path) => direct || [...path].reverse().map((b) => byKind.block.get(b)).find(Boolean) || byKind.layer.get(p.layer));
-      const values = new Set(resolved.map((a) => a ? `${a.finish_id}:${a.scale_multiplier}` : "unassigned"));
+      const values = new Set(resolved.map((a) => a ? `${a.finish_id}:${a.scale_width}:${a.scale_height}` : "unassigned"));
       const conflict = values.size > 1;
       const a = conflict ? undefined : resolved[0];
       return {
@@ -68,7 +86,7 @@ export default function ModelWorkspace() {
         color: colors.get(p.layer) || "#71717a",
         finish: a?.finish ? {
           url: a.finish.image_url, sw_w: a.finish.swatch_width_in, sw_h: a.finish.swatch_height_in,
-          scale: a.scale_multiplier || 1, metallic: false,  // category alone does not imply a metal shader
+          scale_w: a.scale_width || 1, scale_h: a.scale_height || 1, metallic: false,  // category alone does not imply a metal shader
         } : null,
       };
     });
@@ -349,7 +367,7 @@ export default function ModelWorkspace() {
                       <span className="min-w-0 flex-1 truncate text-sm text-zinc-200">{a.target_kind === "part" ? (model.structure?.parts.find((p) => partTarget(p) === a.target_name)?.name || `${a.target_name} (stale target)`) : a.target_name}</span>
                       {a.finish && <img src={a.finish.thumb_url} alt="" className="h-7 w-7 rounded object-cover" />}
                       <span className="w-32 truncate text-xs text-zinc-400">{a.finish?.name}</span>
-                      <AssignmentScale value={a.scale_multiplier} onSave={(scale) => assign({ kind: a.target_kind, name: a.target_name }, a.finish_id, scale)} />
+                      <AssignmentScalePair valueW={a.scale_width} valueH={a.scale_height} onSave={(w, h) => assign({ kind: a.target_kind, name: a.target_name }, a.finish_id, w, h)} />
                       <button onClick={() => setPicker({ kind: a.target_kind, name: a.target_name })}
                         className="rounded-lg border border-zinc-700 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800">Change</button>
                       <button onClick={() => assign({ kind: a.target_kind, name: a.target_name }, null)}
@@ -386,7 +404,7 @@ export default function ModelWorkspace() {
       {/* modals */}
       <FinishPicker open={!!picker} onClose={() => setPicker(null)}
         title={picker ? `Assign finish → ${picker.kind}: ${picker.label || (picker.kind === "part" ? model.structure?.parts.find((p) => partTarget(p) === picker.name)?.name : picker.name) || picker.name}` : ""}
-        onPick={(f: Finish) => picker && assign(picker, f.id, assignFor(picker)?.scale_multiplier || 1)} />
+        onPick={(f: Finish) => picker && assign(picker, f.id, assignFor(picker)?.scale_width || 1, assignFor(picker)?.scale_height || 1)} />
       <AutoMatchModal open={autoOpen} onClose={() => setAutoOpen(false)} modelId={modelId} onApplied={refresh} />
       <ApplyPresetModal open={applyOpen} onClose={() => setApplyOpen(false)} modelId={modelId} onApplied={refresh} />
       <Modal open={saveOpen} onClose={() => setSaveOpen(false)} title="Save mapping as preset">

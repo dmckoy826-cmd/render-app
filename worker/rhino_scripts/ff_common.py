@@ -149,15 +149,16 @@ def _assignment_value(a):
     if finish.get("id") is None:
         raise ValueError("A finish assignment no longer has a valid finish.")
     try:
-        scale = float(a.get("scale_multiplier", 1))
+        width_mult = float(a.get("scale_width", 1))
+        height_mult = float(a.get("scale_height", 1))
         width = float(finish.get("swatch_width_in", 0))
         height = float(finish.get("swatch_height_in", 0))
     except (ValueError, TypeError):
         raise ValueError("Finish dimensions and scale must be numbers.")
     if not all(math.isfinite(v) if hasattr(math, "isfinite") else not (math.isnan(v) or math.isinf(v))
-               for v in (scale, width, height)) or min(scale, width, height) <= 0:
+               for v in (width_mult, height_mult, width, height)) or min(width_mult, height_mult, width, height) <= 0:
         raise ValueError("Finish dimensions and scale must be finite and greater than zero.")
-    return (str(finish["id"]), scale)
+    return (str(finish["id"]), width_mult, height_mult)
 
 
 def plan_assignments(scene, assignments):
@@ -215,7 +216,6 @@ def plan_assignments(scene, assignments):
             result[key] = selected
     # Overridden lower-priority rules are harmless; they need not be selected.
     return result
-
 
 
 def topology_signature(scene):

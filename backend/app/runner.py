@@ -219,8 +219,9 @@ def build_finish_lookup(db: Session, model: ModelDoc) -> tuple[dict, dict, list[
         if a.target_kind == "layer":
             tex = imaging.Image.open(str(config.MEDIA_DIR / f.storage_path)).convert("RGB")
             tex.thumbnail((1024, 1024))
-            mult = a.scale_multiplier or 1.0
-            finish_lookup[a.target_name] = (tex, f.swatch_width_in * mult, f.swatch_height_in * mult)
+            width_mult = a.scale_width or 1.0
+            height_mult = a.scale_height or 1.0
+            finish_lookup[a.target_name] = (tex, f.swatch_width_in * width_mult, f.swatch_height_in * height_mult)
         snap = by_finish.setdefault(f.id, {
             "finish_id": f.id, "name": f.name, "category": f.category,
             "thumb": f"/media/{f.thumb_path}" if f.thumb_path else "", "targets": [],
@@ -239,11 +240,12 @@ def build_finish_lookup(db: Session, model: ModelDoc) -> tuple[dict, dict, list[
                 if hit:
                     tex = imaging.Image.open(str(config.MEDIA_DIR / f.storage_path)).convert("RGB")
                     tex.thumbnail((1024, 1024))
-                    mult = a.scale_multiplier or 1.0
+                    width_mult = a.scale_width or 1.0
+                    height_mult = a.scale_height or 1.0
                     # give the part its own virtual layer so it can differ from its layer-mates
                     vlayer = f"__part_{p['id']}"
                     p["_vlayer"] = vlayer
-                    finish_lookup[vlayer] = (tex, f.swatch_width_in * mult, f.swatch_height_in * mult)
+                    finish_lookup[vlayer] = (tex, f.swatch_width_in * width_mult, f.swatch_height_in * height_mult)
                     layer_colors[vlayer] = layer_colors.get(p["layer"], "#8d929a")
     return finish_lookup, layer_colors, list(by_finish.values())
 
@@ -259,7 +261,7 @@ def agent_assignment_snapshot(db: Session, model_id: int) -> list[dict]:
         payload = None if finish is None else {**finish_out(finish),
                                                 "file_url": f"/media/{finish.storage_path}"}
         assignments.append({"target_kind": row.target_kind, "target_name": row.target_name,
-                            "scale_multiplier": row.scale_multiplier, "finish": payload})
+                            "scale_width": row.scale_width, "scale_height": row.scale_height, "finish": payload})
     return assignments
 
 def snapshot_from_agent_assignments(assignments: list[dict]) -> list[dict]:
@@ -349,18 +351,19 @@ def auto_assign_from_names(db: Session, model: ModelDoc, threshold: float = 0.45
 
 
 def upsert_assignment(db: Session, model_id: int, kind: str, name: str,
-                      finish_id: int, scale_multiplier: float = 1.0) -> Assignment:
+                      finish_id: int, scale_width: float = 1.0, scale_height: float = 1.0) -> Assignment:
     a = db.query(Assignment).filter(
         Assignment.model_id == model_id,
         Assignment.target_kind == kind,
         Assignment.target_name == name).first()
     if a:
         a.finish_id = finish_id
-        a.scale_multiplier = scale_multiplier
+        a.scale_width = scale_width
+        a.scale_height = scale_height
         a.updated_at = utcnow()
     else:
         a = Assignment(model_id=model_id, target_kind=kind, target_name=name,
-                       finish_id=finish_id, scale_multiplier=scale_multiplier)
+                       finish_id=finish_id, scale_width=scale_width, scale_height=scale_height)
         db.add(a)
     db.commit()
     db.refresh(a)
