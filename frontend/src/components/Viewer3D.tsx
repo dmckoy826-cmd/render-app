@@ -137,10 +137,8 @@ export default function Viewer3D({
   const skuNames = [...new Set(skuLayerNames)].sort((a, b) => a.localeCompare(b));
   const visibleLayerKey = visibleLayers === null ? "*" : [...visibleLayers].sort().join("|");
   const visibleSkuKey = visibleSkuLayers === null ? "*" : [...visibleSkuLayers].sort().join("|");
-  const shownItems = items.filter((item) =>
-    (visibleLayers === null || visibleLayers.has(item.layer)) &&
-    (visibleSkuLayers === null || (item.skuLayers || []).some((name) => visibleSkuLayers.has(name)))
-  );
+  const shownItems = items.filter((item) => visibleLayers === null || visibleLayers.has(item.layer));
+  const noVisibleSelection = visibleLayers?.size === 0 || visibleSkuLayers?.size === 0;
   const selectedKey = [...selected].sort().join("|");
   const onSelectRef = useRef(onSelect);
   onSelectRef.current = onSelect;
@@ -317,12 +315,16 @@ export default function Viewer3D({
     const partsForItem = (item: ViewerItem) => (geometryById.get(item.id) || []).filter((part) => {
       if (visibleSkuLayers === null) return true;
       if (part.sku_layer) return visibleSkuLayers.has(part.sku_layer);
-      // Old cached previews merged identical parts from multiple SKU instances. Do
-      // not show that ambiguous geometry when a specific SKU has been selected.
-      return skuGeometryReady && item.skuLayers.length === 1 && visibleSkuLayers.has(item.skuLayers[0]);
+      // Old cached previews merged identical parts from multiple SKU instances.
+      // Never substitute shared sublayer geometry for an exact SKU-layer selection.
+      return false;
     });
+    const activeItems = noVisibleSelection ? [] : shownItems.filter((item) =>
+      visibleSkuLayers === null || partsForItem(item).length > 0
+    );
+    if (!activeItems.length) return;
     const min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
-    for (const item of shownItems) {
+    for (const item of activeItems) {
       const matchedParts = partsForItem(item);
       const bounds = matchedParts.map((part) => part.bbox).filter((box): box is BBox => !!box);
       if (bounds.length) {
@@ -341,7 +343,7 @@ export default function Viewer3D({
     st.origin = origin;
     st.radius = radius;
     const showBoxes = !geometry && visibleSkuLayers === null;
-    for (const item of shownItems) {
+    for (const item of activeItems) {
       const previewParts = partsForItem(item);
       const isSelected = selected.has(item.id);
       for (const part of previewParts) {
@@ -391,7 +393,7 @@ export default function Viewer3D({
         edges.position.copy(box.position); group.add(edges);
       }
     }
-    const frameKey = `${geometryUrl || "boxes"}:${min.join(",")}:${max.join(",")}:${shownItems.map((i) => i.id).join("|")}:${visibleSkuKey}`;
+    const frameKey = `${geometryUrl || "boxes"}:${min.join(",")}:${max.join(",")}:${activeItems.map((i) => i.id).join("|")}:${visibleSkuKey}`;
     if (st.framed !== frameKey) {
       camera.position.set(radius * 1.5, radius * 1.05, -radius * 1.5);
       camera.near = Math.max(radius / 10000, 0.001); camera.far = Math.max(radius * 100, 10000);
@@ -401,7 +403,8 @@ export default function Viewer3D({
     }
   }, [items, geometry, geometryUrl, selectedKey, visibleLayerKey, visibleSkuKey, skuGeometryReady]);
 
-  const label = shownItems.length === 0 ? "No preview geometry visible — turn on a SKU or part layer"
+  const label = noVisibleSelection || shownItems.length === 0 ? "No preview geometry visible — turn on a SKU or part layer"
+    : visibleSkuLayers !== null && !skuGeometryReady ? "Re-analyze this model to isolate geometry by SKU layer"
     : status === "loading" ? "Loading Rhino geometry… (boxes shown temporarily)"
     : status === "error" ? "Geometry could not be loaded — bounding-box fallback"
     : status === "mesh" ? (simulatedGeometry ? "Synthetic test geometry — not Rhino" : partial ? "Stored Rhino tessellation is partial — see analysis warning" : "Rhino tessellated geometry · finish preview is approximate")
