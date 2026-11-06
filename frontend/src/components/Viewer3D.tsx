@@ -314,7 +314,7 @@ export default function Viewer3D({
     }
     const partsForItem = (item: ViewerItem) => (geometryById.get(item.id) || []).filter((part) => {
       if (visibleSkuLayers === null) return true;
-      if (part.sku_layer) return visibleSkuLayers.has(part.sku_layer);
+      if (part.sku_layer) return visibleSkuLayers.has(part.sku_layer.split("::", 1)[0]);
       // Old cached previews merged identical parts from multiple SKU instances.
       // Never substitute shared sublayer geometry for an exact SKU-layer selection.
       return false;

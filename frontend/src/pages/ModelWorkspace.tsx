@@ -15,6 +15,10 @@ import type { Assignment, CameraPose, Finish, ModelDetail, Part, Preset, RenderR
 
 type Target = { kind: "layer" | "block" | "part"; name: string; label?: string };
 
+// Older analyses identified child sublayers as SKU layers. Treat their full paths
+// as belonging to the root SKU layer, without forcing another expensive analysis.
+const skuRoot = (name: string) => name.split("::", 1)[0];
+
 function AssignmentTransformButton({
   assignment,
   onOpen,
@@ -127,8 +131,9 @@ export default function ModelWorkspace() {
       const values = new Set(resolved.map((a) => a ? `${a.finish_id}:${a.scale_multiplier}:${a.rotation_deg || 0}:${a.offset_u_in || 0}:${a.offset_v_in || 0}` : "unassigned"));
       const conflict = values.size > 1;
       const a = conflict ? undefined : resolved[0];
-      const skuLayers = p.sku_layers || model.structure!.sku_layers
+      const rawSkuLayers = p.sku_layers || model.structure!.sku_layers
         ?.filter((sku) => sku.part_layers.includes(p.layer)).map((sku) => sku.name) || [];
+      const skuLayers = [...new Set(rawSkuLayers.map(skuRoot))];
       return {
         id: p.id, name: p.name, layer: p.layer, skuLayers, bbox: p.bbox, rbe: p.requires_block_edit, conflict,
         color: colors.get(p.layer) || "#71717a",
@@ -261,7 +266,7 @@ export default function ModelWorkspace() {
           <div className="relative min-h-[360px] min-w-0 overflow-hidden border-b border-zinc-800 bg-gradient-to-b from-zinc-900 to-zinc-950 xl:border-b-0 xl:border-r">
             <Viewer3D items={stableItems} selected={selected} geometryUrl={model.structure?.geometry_url}
               geometryApiUrl={model.structure?.geometry_api_url}
-              skuLayerNames={(model.structure?.sku_layers || []).map((sku) => sku.name)}
+              skuLayerNames={[...new Set((model.structure?.sku_layers || []).map((sku) => skuRoot(sku.name)))]}
               skuGeometryReady={model.structure?.preview_schema === 2}
               partial={model.structure?.geometry_status === "partial"}
               simulatedGeometry={!model.structure?.analyzer?.startsWith("rhino") || /fake|stub/i.test(model.structure?.analyzer || "")}

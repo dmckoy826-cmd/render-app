@@ -172,7 +172,7 @@ def get_model_geometry(model_id: int, request: Request, db: Session = Depends(ge
     layer_filter = set(request.query_params.getlist("layer"))
     if sku_filter or layer_filter:
         payload["parts"] = [part for part in payload.get("parts", [])
-                             if (not sku_filter or part.get("sku_layer") in sku_filter)
+                             if (not sku_filter or str(part.get("sku_layer", "")).split("::", 1)[0] in sku_filter)
                              and (not layer_filter or part.get("layer") in layer_filter)]
     return payload
 

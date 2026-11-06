@@ -89,14 +89,14 @@ class AgentApiTests(unittest.TestCase):
         structure_data = structure()
         structure_data["preview_schema"] = 2
         structure_data["sku_layers"] = [
-            {"name": "SKU-A", "part_layers": ["L1"]},
-            {"name": "SKU-B", "part_layers": ["L2"]},
+            {"name": "SKU-A::Body", "part_layers": ["L1"]},
+            {"name": "SKU-B::Body", "part_layers": ["L2"]},
         ]
         structure_data["parts"][0]["sku_layers"] = ["SKU-A", "SKU-B"]
         mesh = {"positions": [0, 0, 0, 1, 0, 0, 0, 1, 0], "triangles": [0, 1, 2], "lines": []}
         payload = {"version": 1, "units": "inches", "parts": [
-            {"id": "p1", "layer": "L1", "sku_layer": "SKU-A", **mesh},
-            {"id": "p1", "layer": "L2", "sku_layer": "SKU-B", **mesh},
+            {"id": "p1", "layer": "L1", "sku_layer": "SKU-A::Body", **mesh},
+            {"id": "p1", "layer": "L2", "sku_layer": "SKU-B::Body", **mesh},
         ]}
         response = self.client.post(f"/api/agent/jobs/{job_id}/complete",
             data={"structure": json.dumps(structure_data)},
@@ -105,7 +105,7 @@ class AgentApiTests(unittest.TestCase):
         model = self.client.get(f"/api/models/{model_id}").json()
         api_url = model["structure"]["geometry_api_url"]
         by_sku = self.client.get(api_url, params={"sku_layer": "SKU-B"}).json()
-        self.assertEqual([part["sku_layer"] for part in by_sku["parts"]], ["SKU-B"])
+        self.assertEqual([part["sku_layer"] for part in by_sku["parts"]], ["SKU-B::Body"])
         by_layer = self.client.get(api_url, params={"layer": "L1"}).json()
         self.assertEqual([part["layer"] for part in by_layer["parts"]], ["L1"])
 
