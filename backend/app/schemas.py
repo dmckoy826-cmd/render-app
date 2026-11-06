@@ -62,6 +62,8 @@ class RenderSettings(BaseModel):
     named_view: Optional[str] = None
     keep_file_view: bool = False
     use_file_vray_settings: bool = False
+    vray_device: Optional[str] = None
+    vray_speed: Optional[str] = None
     isolate_sku_layer: Optional[str] = None
     batch: Optional[dict] = None
 

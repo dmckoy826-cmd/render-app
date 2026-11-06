@@ -94,6 +94,8 @@ export default function RenderDialog({
   const [w, setW] = useState(1920);
   const [h, setH] = useState(1080);
   const [useFileVray, setUseFileVray] = useState(false);
+  const [vrayDevice, setVrayDevice] = useState<string>("rtx");
+  const [vraySpeed, setVraySpeed] = useState<string>("fast");
   const [quality, setQuality] = useState<"draft" | "standard" | "high">("standard");
   const [cameraChoice, setCameraChoice] = useState<string>("viewer");
   const [singleIsolateSku, setSingleIsolateSku] = useState<string>("");
@@ -434,6 +436,8 @@ export default function RenderDialog({
           camera,
           keep_file_view,
           use_file_vray_settings: useFileVray,
+          vray_device: vrayDevice,
+          vray_speed: vraySpeed,
           ...(mode === "single" && singleIsolateSku
             ? { isolate_sku_layer: singleIsolateSku }
             : {}),
@@ -572,6 +576,41 @@ export default function RenderDialog({
                   ))}
                 </div>
               )}
+            </div>
+          </div>
+
+          {/* V-Ray API Hardware Acceleration & Speed Controls */}
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <div>
+              <label className="mb-1.5 block text-xs uppercase tracking-wide text-zinc-500">
+                V-Ray Render Engine (API)
+              </label>
+              <select
+                value={vrayDevice}
+                onChange={(e) => setVrayDevice(e.target.value)}
+                className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-zinc-200 outline-none focus:border-amber-500/60"
+              >
+                <option value="rtx">NVIDIA RTX (Fastest GPU Raytracing)</option>
+                <option value="cuda">GPU CUDA / Hybrid (GPU + CPU)</option>
+                <option value="cpu">CPU Only</option>
+                <option value="file">Keep Engine Saved in Rhino File</option>
+              </select>
+            </div>
+            <div>
+              <label className="mb-1.5 block text-xs uppercase tracking-wide text-zinc-500">
+                V-Ray Speed / Noise Limit (API)
+              </label>
+              <select
+                value={vraySpeed}
+                onChange={(e) => setVraySpeed(e.target.value)}
+                className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-zinc-200 outline-none focus:border-amber-500/60"
+              >
+                <option value="turbo">Turbo Preview (~15s cap · Noise 0.05)</option>
+                <option value="fast">Fast Production (~45s cap · Noise 0.025)</option>
+                <option value="balanced">Balanced Quality (~90s cap · Noise 0.015)</option>
+                <option value="high">High Quality (~3m cap · Noise 0.008)</option>
+                <option value="file">Keep Noise / Time Settings from Rhino File</option>
+              </select>
             </div>
           </div>
 

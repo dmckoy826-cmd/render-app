@@ -35,6 +35,8 @@ CAMERA_POSE = os.environ.get("FF_CAMERA_POSE", "")
 NAMED_VIEW = os.environ.get("FF_NAMED_VIEW", "")
 KEEP_FILE_VIEW = os.environ.get("FF_KEEP_FILE_VIEW", "") == "1"
 USE_FILE_VRAY = os.environ.get("FF_USE_FILE_VRAY", "") == "1"
+VRAY_DEVICE = os.environ.get("FF_VRAY_DEVICE", "")
+VRAY_SPEED = os.environ.get("FF_VRAY_SPEED", "")
 ISOLATE_SKU = os.environ.get("FF_ISOLATE_SKU", "")
 BATCH_FILE = os.environ.get("FF_BATCH", "")
 JOB_ID = os.environ.get("FF_JOB_ID", "")
@@ -401,8 +403,73 @@ def edit_definition(definition, wanted, materials):
             raise RuntimeError("Could not remove temporary block instance '%s'." % definition.Name)
 
 
-def apply_target_finish(assignment, mat_info, mapped_ids):
-    """Apply finish + scale + rotation + offset to a target (layer, block, or part)."""
+def build_batch_target_index(need_parts=False):
+    """Index layers, top-level objects, and block objects once before the batch loop."""
+    layer_full_by_idx = {}
+    layer_short_by_idx = {}
+    for layer in sc.doc.Layers:
+        if layer.IsDeleted:
+            continue
+        layer_full_by_idx[layer.Index] = layer.FullPath or layer.Name or ""
+        layer_short_by_idx[layer.Index] = layer.Name or ""
+
+    objs_by_layer_idx = {}
+    objs_by_block = {}
+    objs_by_part = {}
+    top_RenderObjs = []
+
+    enum_settings = Rhino.DocObjects.ObjectEnumeratorSettings()
+    enum_settings.NormalObjects = True
+    enum_settings.HiddenObjects = True
+    enum_settings.LockedObjects = False
+    for obj in sc.doc.Objects.GetObjectList(enum_settings) or []:
+        if obj is None:
+            continue
+        top_RenderObjs.append(obj)
+        if isinstance(obj, Rhino.DocObjects.InstanceObject):
+            continue
+        if obj.ObjectType == Rhino.DocObjects.ObjectType.Light:
+            continue
+        lidx = obj.Attributes.LayerIndex
+        objs_by_layer_idx.setdefault(lidx, []).append(obj)
+        if need_parts:
+            info = identity(obj, None)
+            if info and info.get("renderable"):
+                objs_by_part.setdefault(info["key"], []).append(obj)
+                if info.get("name"):
+                    objs_by_part.setdefault(info["name"], []).append(obj)
+
+    for d in sc.doc.InstanceDefinitions:
+        if d.IsDeleted:
+            continue
+        b_list = objs_by_block.setdefault(d.Name, [])
+        for obj in d.GetObjects() or []:
+            if obj is None or isinstance(obj, Rhino.DocObjects.InstanceObject):
+                continue
+            if obj.ObjectType == Rhino.DocObjects.ObjectType.Light:
+                continue
+            b_list.append(obj)
+            lidx = obj.Attributes.LayerIndex
+            objs_by_layer_idx.setdefault(lidx, []).append(obj)
+            if need_parts:
+                info = identity(obj, d.Name)
+                if info and info.get("renderable"):
+                    objs_by_part.setdefault(info["key"], []).append(obj)
+                    if info.get("name"):
+                        objs_by_part.setdefault(info["name"], []).append(obj)
+
+    return {
+        "layer_full_by_idx": layer_full_by_idx,
+        "layer_short_by_idx": layer_short_by_idx,
+        "objs_by_layer_idx": objs_by_layer_idx,
+        "objs_by_block": objs_by_block,
+        "objs_by_part": objs_by_part,
+        "top_objs": top_RenderObjs,
+    }
+
+
+def apply_target_finish(assignment, mat_info, mapped_ids, target_index=None):
+    """Apply finish + scale + rotation + offset to a target (layer, block, or part) quickly."""
     target_kind = assignment.get("target_kind", "layer")
     target_name = assignment.get("target_name", "")
     if not target_name:
@@ -418,7 +485,10 @@ def apply_target_finish(assignment, mat_info, mapped_ids):
     sw_h = float(f["swatch_height_in"]) * mult
     mapping_token = (round(sw_w, 4), round(sw_h, 4), round(rot, 4), round(off_u, 4), round(off_v, 4))
 
-    target_layer_indices = set()
+    if target_index is None:
+        target_index = build_batch_target_index(need_parts=(target_kind == "part"))
+
+    matched_objs = []
     if target_kind == "layer":
         for layer in sc.doc.Layers:
             if layer.IsDeleted:
@@ -426,50 +496,43 @@ def apply_target_finish(assignment, mat_info, mapped_ids):
             full = layer.FullPath or layer.Name or ""
             short = layer.Name or ""
             if full == target_name or short == target_name or full.endswith("::" + target_name):
-                target_layer_indices.add(layer.Index)
                 try:
-                    layer.RenderMaterialIndex = material_index
+                    if layer.RenderMaterialIndex != material_index:
+                        layer.RenderMaterialIndex = material_index
                     if render_mat is not None:
                         layer.RenderMaterial = render_mat
-                    sc.doc.Layers.Modify(layer, layer.Index, True)
+                    sc.doc.Layers.Modify(layer, layer.Index, False)
                 except Exception:
                     pass
+                matched_objs.extend(target_index["objs_by_layer_idx"].get(layer.Index, []))
+    elif target_kind == "block":
+        matched_objs.extend(target_index["objs_by_block"].get(target_name, []))
+    elif target_kind == "part":
+        matched_objs.extend(target_index["objs_by_part"].get(target_name, []))
 
-    def update_obj(obj, owner_name):
-        if obj is None or isinstance(obj, Rhino.DocObjects.InstanceObject):
-            return
-        info = identity(obj, owner_name)
-        if not info or not info.get("renderable"):
-            return
-        matched = False
-        if target_kind == "layer":
-            matched = (obj.Attributes.LayerIndex in target_layer_indices or
-                       info["layer"] == target_name or
-                       info["layer"].endswith("::" + target_name))
-        elif target_kind == "block":
-            matched = (owner_name == target_name)
-        elif target_kind == "part":
-            matched = (info["key"] == target_name or info["name"] == target_name)
-        if not matched:
-            return
+    for obj in matched_objs:
         try:
-            attr = obj.Attributes.Duplicate()
-            attr.MaterialSource = Rhino.DocObjects.ObjectMaterialSource.MaterialFromObject
-            attr.MaterialIndex = material_index
-            if render_mat is not None:
-                try:
-                    attr.RenderMaterial = render_mat
-                except Exception:
-                    pass
-            if not sc.doc.Objects.ModifyAttributes(obj, attr, True):
-                obj.Attributes.MaterialSource = Rhino.DocObjects.ObjectMaterialSource.MaterialFromObject
-                obj.Attributes.MaterialIndex = material_index
+            cur_src = obj.Attributes.MaterialSource
+            cur_idx = obj.Attributes.MaterialIndex
+            if (cur_src != Rhino.DocObjects.ObjectMaterialSource.MaterialFromObject or
+                    cur_idx != material_index):
+                attr = obj.Attributes.Duplicate()
+                attr.MaterialSource = Rhino.DocObjects.ObjectMaterialSource.MaterialFromObject
+                attr.MaterialIndex = material_index
                 if render_mat is not None:
                     try:
-                        obj.Attributes.RenderMaterial = render_mat
+                        attr.RenderMaterial = render_mat
                     except Exception:
                         pass
-                obj.CommitChanges()
+                if not sc.doc.Objects.ModifyAttributes(obj, attr, True):
+                    obj.Attributes.MaterialSource = Rhino.DocObjects.ObjectMaterialSource.MaterialFromObject
+                    obj.Attributes.MaterialIndex = material_index
+                    if render_mat is not None:
+                        try:
+                            obj.Attributes.RenderMaterial = render_mat
+                        except Exception:
+                            pass
+                    obj.CommitChanges()
         except Exception:
             pass
         oid_key = str(obj.Id)
@@ -483,20 +546,8 @@ def apply_target_finish(assignment, mat_info, mapped_ids):
             except Exception:
                 pass
 
-    enum_settings = Rhino.DocObjects.ObjectEnumeratorSettings()
-    enum_settings.NormalObjects = True
-    enum_settings.HiddenObjects = True
-    enum_settings.LockedObjects = True
-    for obj in sc.doc.Objects.GetObjectList(enum_settings) or []:
-        update_obj(obj, None)
-    for d in sc.doc.InstanceDefinitions:
-        if d.IsDeleted:
-            continue
-        for obj in d.GetObjects() or []:
-            update_obj(obj, d.Name)
 
-
-def isolate_sku_layer(target_sku, all_sku_layers):
+def isolate_sku_layer(target_sku, all_sku_layers, target_index=None):
     """Turn ON only target_sku (and its ancestor/child layers) and turn OFF all other SKU layers."""
     other_skus = set(all_sku_layers) - set([target_sku])
 
@@ -525,63 +576,128 @@ def isolate_sku_layer(target_sku, all_sku_layers):
         elif any(is_same_or_child(full, short, o) for o in other_skus):
             other_indices.add(layer.Index)
 
-    # Rhino cannot turn off the CurrentLayer! Always make target_sku (or layer 0) current first.
-    if first_target_idx is not None:
+    rs.EnableRedraw(False)
+    try:
+        # Rhino cannot turn off the CurrentLayer! Always make target_sku current first.
+        if first_target_idx is not None:
+            try:
+                sc.doc.Layers[first_target_idx].IsVisible = True
+                sc.doc.Layers.Modify(sc.doc.Layers[first_target_idx], first_target_idx, False)
+                sc.doc.Layers.SetCurrentLayerIndex(first_target_idx, True)
+            except Exception:
+                pass
+
+        for layer in sc.doc.Layers:
+            if layer.IsDeleted:
+                continue
+            full = layer.FullPath or layer.Name or ""
+            if layer.Index in target_indices:
+                if not layer.IsVisible:
+                    try:
+                        layer.IsVisible = True
+                        if hasattr(layer, "SetPersistentVisibility"):
+                            layer.SetPersistentVisibility(True)
+                        sc.doc.Layers.Modify(layer, layer.Index, False)
+                        rs.LayerVisible(full, True)
+                    except Exception:
+                        pass
+            elif layer.Index in other_indices:
+                if layer.IsVisible:
+                    try:
+                        layer.IsVisible = False
+                        if hasattr(layer, "SetPersistentVisibility"):
+                            layer.SetPersistentVisibility(False)
+                        sc.doc.Layers.Modify(layer, layer.Index, False)
+                        rs.LayerVisible(full, False)
+                    except Exception:
+                        pass
+            else:
+                if not layer.IsVisible:
+                    try:
+                        layer.IsVisible = True
+                        sc.doc.Layers.Modify(layer, layer.Index, False)
+                    except Exception:
+                        pass
+
+        top_objs = target_index["top_objs"] if target_index else None
+        if top_objs is None:
+            enum_settings = Rhino.DocObjects.ObjectEnumeratorSettings()
+            enum_settings.NormalObjects = True
+            enum_settings.HiddenObjects = True
+            enum_settings.LockedObjects = False
+            top_objs = sc.doc.Objects.GetObjectList(enum_settings) or []
+
+        for obj in top_objs:
+            if obj is None or obj.ObjectType == Rhino.DocObjects.ObjectType.Light:
+                continue
+            lidx = obj.Attributes.LayerIndex
+            if lidx in target_indices:
+                if obj.IsHidden:
+                    sc.doc.Objects.Show(obj.Id, True)
+            elif lidx in other_indices:
+                if not obj.IsHidden:
+                    sc.doc.Objects.Hide(obj.Id, True)
+    finally:
+        rs.EnableRedraw(True)
+
+
+def configure_vray_acceleration(vray):
+    """Configure V-Ray GPU/RTX engine and noise/time limits via the V-Ray Scene API."""
+    if not hasattr(vray, "Scene"):
+        return
+
+    def set_plugin_prop(plugin_path, key, val):
         try:
-            sc.doc.Layers[first_target_idx].IsVisible = True
-            sc.doc.Layers.Modify(sc.doc.Layers[first_target_idx], first_target_idx, True)
-            sc.doc.Layers.SetCurrentLayerIndex(first_target_idx, True)
+            node = vray.Scene[plugin_path]
+            if node is None:
+                return
+            try:
+                setattr(node, key, val)
+            except Exception:
+                node[key] = val
         except Exception:
             pass
 
-    for layer in sc.doc.Layers:
-        if layer.IsDeleted:
-            continue
-        full = layer.FullPath or layer.Name or ""
-        if layer.Index in target_indices:
+    if VRAY_DEVICE and VRAY_DEVICE != "file":
+        # V-Ray for Rhino engine constants: 0=CPU, 5=CUDA (GPU), 7=RTX
+        engine_map = {"cpu": 0, "cuda": 5, "rtx": 7}
+        eng = engine_map.get(VRAY_DEVICE.lower())
+        if eng is not None:
             try:
-                layer.IsVisible = True
-                if hasattr(layer, "SetPersistentVisibility"):
-                    layer.SetPersistentVisibility(True)
-                sc.doc.Layers.Modify(layer, layer.Index, True)
-                rs.LayerVisible(full, True)
+                if hasattr(vray, "SetRenderEngine"):
+                    vray.SetRenderEngine(eng)
             except Exception:
                 pass
-        elif layer.Index in other_indices:
             try:
-                layer.IsVisible = False
-                if hasattr(layer, "SetPersistentVisibility"):
-                    layer.SetPersistentVisibility(False)
-                sc.doc.Layers.Modify(layer, layer.Index, True)
-                rs.LayerVisible(full, False)
+                if hasattr(vray, "RenderEngine"):
+                    vray.RenderEngine = eng
             except Exception:
                 pass
-        else:
-            # Part layers and light/environment layers stay visible
-            try:
-                if not layer.IsVisible:
-                    layer.IsVisible = True
-                    sc.doc.Layers.Modify(layer, layer.Index, True)
-            except Exception:
-                pass
+            set_plugin_prop("/SettingsRTEngine", "opencl_texsize", 2048)
+            if VRAY_DEVICE.lower() == "rtx":
+                set_plugin_prop("/SettingsRTEngine", "gpu_bundle_size", 128)
+                set_plugin_prop("/SettingsRTEngine", "enable_raytracing", 1)
 
-    enum_settings = Rhino.DocObjects.ObjectEnumeratorSettings()
-    enum_settings.NormalObjects = True
-    enum_settings.HiddenObjects = True
-    enum_settings.LockedObjects = False
-    for obj in sc.doc.Objects.GetObjectList(enum_settings) or []:
-        if obj is None:
-            continue
-        if obj.ObjectType == Rhino.DocObjects.ObjectType.Light:
-            continue
-        lidx = obj.Attributes.LayerIndex
-        if lidx in target_indices:
-            if obj.IsHidden:
-                sc.doc.Objects.Show(obj.Id, True)
-        elif lidx in other_indices:
-            if not obj.IsHidden:
-                sc.doc.Objects.Hide(obj.Id, True)
-    sc.doc.Views.Redraw()
+    if VRAY_SPEED and VRAY_SPEED != "file":
+        # Presets: (noise_threshold, max_time_minutes, max_subdivs)
+        speed_map = {
+            "turbo": (0.05, 0.25, 8),      # ~15s max, noise 0.05
+            "fast": (0.025, 0.75, 12),     # ~45s max, noise 0.025
+            "balanced": (0.015, 1.5, 16),  # ~90s max, noise 0.015
+            "high": (0.008, 3.0, 24),      # ~180s max, noise 0.008
+        }
+        preset = speed_map.get(VRAY_SPEED.lower())
+        if preset:
+            noise, max_mins, max_subdivs = preset
+            set_plugin_prop("/SettingsImageSampler", "type", 3)  # Progressive
+            set_plugin_prop("/SettingsImageSampler", "progressive_threshold", noise)
+            set_plugin_prop("/SettingsImageSampler", "progressive_maxTime", max_mins)
+            set_plugin_prop("/SettingsImageSampler", "progressive_maxSubdivs", max_subdivs)
+            set_plugin_prop("/SettingsImageSampler", "dmc_threshold", noise)
+            set_plugin_prop("/SettingsDMCGI", "adaptive_amount", 0.85)
+            set_plugin_prop("/SettingsRTEngine", "noise_threshold", noise)
+            set_plugin_prop("/SettingsRTEngine", "max_render_time", max_mins)
+            set_plugin_prop("/SettingsRTEngine", "max_sample_level", max_subdivs * 50)
 
 
 def configure_camera_and_output(vray, out_dir, out_filename):
@@ -693,9 +809,24 @@ def run_batch(batch_cfg, renderer, vray):
             if ov.get("finish"):
                 get_mat(ov)
 
-    for a in base_assignments:
-        if a.get("finish") and a.get("target_name"):
-            apply_target_finish(a, get_mat(a), mapped_ids)
+    need_parts = any(
+        a.get("target_kind") == "part"
+        for a in base_assignments
+    ) or any(
+        ov.get("target_kind") == "part"
+        for var in variations
+        for ov in (var.get("overrides") or [])
+    )
+    target_index = build_batch_target_index(need_parts=need_parts)
+    configure_vray_acceleration(vray)
+
+    rs.EnableRedraw(False)
+    try:
+        for a in base_assignments:
+            if a.get("finish") and a.get("target_name"):
+                apply_target_finish(a, get_mat(a), mapped_ids, target_index=target_index)
+    finally:
+        rs.EnableRedraw(True)
 
     total_renders = len(sku_layers) * len(variations)
     done_count = 0
@@ -703,7 +834,7 @@ def run_batch(batch_cfg, renderer, vray):
     last_png = None
 
     for sku_i, sku_layer in enumerate(sku_layers):
-        isolate_sku_layer(sku_layer, all_sku_layers)
+        isolate_sku_layer(sku_layer, all_sku_layers, target_index=target_index)
         sku_folder_name = sanitize_filename(sku_layer)
         sku_dir = os.path.join(output_dir, sku_folder_name)
         if not os.path.isdir(sku_dir):
@@ -719,16 +850,18 @@ def run_batch(batch_cfg, renderer, vray):
                     var_i + 1, len(variations), label,
                 ),
             )
-            # Re-apply base assignments that might have been overridden by a previous variation
             override_keys = set((ov.get("target_kind", "layer"), ov.get("target_name")) for ov in (var.get("overrides") or []))
-            for a in base_assignments:
-                if (a.get("target_kind", "layer"), a.get("target_name")) not in override_keys:
-                    if a.get("finish") and a.get("target_name"):
-                        apply_target_finish(a, get_mat(a), mapped_ids)
-            for ov in var.get("overrides") or []:
-                if ov.get("finish") and ov.get("target_name"):
-                    apply_target_finish(ov, get_mat(ov), mapped_ids)
-            sc.doc.Views.Redraw()
+            rs.EnableRedraw(False)
+            try:
+                for a in base_assignments:
+                    if (a.get("target_kind", "layer"), a.get("target_name")) not in override_keys:
+                        if a.get("finish") and a.get("target_name"):
+                            apply_target_finish(a, get_mat(a), mapped_ids, target_index=target_index)
+                for ov in var.get("overrides") or []:
+                    if ov.get("finish") and ov.get("target_name"):
+                        apply_target_finish(ov, get_mat(ov), mapped_ids, target_index=target_index)
+            finally:
+                rs.EnableRedraw(True)
 
             png_name = sanitize_filename(label) + ".png"
             dest_png = os.path.join(sku_dir, png_name)
@@ -846,6 +979,7 @@ def main():
     out = os.path.join(OUT_DIR, "render.png")
     if os.path.exists(out):
         os.remove(out)
+    configure_vray_acceleration(vray)
     configure_camera_and_output(vray, OUT_DIR, "render.png")
     vray.Render(0, 0, -1)
     if not os.path.isfile(out) or os.path.getsize(out) == 0:
