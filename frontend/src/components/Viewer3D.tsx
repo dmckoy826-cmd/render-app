@@ -85,8 +85,9 @@ function positionsInThree(points: number[], origin: number[]): number[] {
   return out;
 }
 
-/** Project each triangle using its dominant face. This is an approximate UI preview,
- * not a promise that the final V-Ray material/mapping will look identical. */
+/** Box-project each finish texture onto the dominant face axis before requesting
+ * the texture image or adding the mesh to the preview. This mirrors Rhino's Box
+ * mapping choice; the UI preview remains approximate, not a V-Ray guarantee. */
 function meshGeometry(part: PreviewPart, finish: ViewerItem["finish"], origin: number[]): THREE.BufferGeometry {
   const indexed = new THREE.BufferGeometry();
   indexed.setAttribute("position", new THREE.Float32BufferAttribute(positionsInThree(part.positions, origin), 3));

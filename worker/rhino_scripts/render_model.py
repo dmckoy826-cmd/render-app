@@ -164,21 +164,6 @@ def make_material(assignment):
     return {"index": index, "render_material": render_mat, "name": material.Name}
 
 
-def planar_mapping(geometry):
-    try:
-        if isinstance(geometry, Rhino.Geometry.Brep):
-            if geometry.Faces.Count != 1:
-                return None
-            result = geometry.Faces[0].TryGetPlane()
-        elif isinstance(geometry, Rhino.Geometry.Surface):
-            result = geometry.TryGetPlane()
-        else:
-            return None
-        return result[1] if result and result[0] else None
-    except Exception:
-        return None
-
-
 def _transform_mapping_plane(base_plane, rotation_deg, u_off_units, v_off_units):
     plane = Rhino.Geometry.Plane(base_plane)
     if abs(rotation_deg) > 1e-7:
@@ -189,6 +174,11 @@ def _transform_mapping_plane(base_plane, rotation_deg, u_off_units, v_off_units)
 
 
 def mapping_for(obj, sw_w, sw_h, rotation_deg=0.0, offset_u_in=0.0, offset_v_in=0.0, relaxed=False):
+    """Create a verified physical-scale Box mapping for every finish target.
+
+    Do not choose planar mapping for single-face geometry: the previewer and V-Ray
+    must use the same Box projection for layer, block, and part assignments.
+    """
     inches_per_unit = Rhino.RhinoMath.UnitScale(sc.doc.ModelUnitSystem, Rhino.UnitSystem.Inches)
     if inches_per_unit <= 0:
         if relaxed:
@@ -200,20 +190,15 @@ def mapping_for(obj, sw_w, sw_h, rotation_deg=0.0, offset_u_in=0.0, offset_v_in=
     v_off = float(offset_v_in or 0.0) / inches_per_unit
     rot = float(rotation_deg or 0.0)
     interval = Rhino.Geometry.Interval
-    plane = planar_mapping(obj.Geometry)
-    if plane is not None:
-        t_plane = _transform_mapping_plane(plane, rot, u_off, v_off)
-        mapping = Rhino.Render.TextureMapping.CreatePlaneMapping(
-            t_plane, interval(0, w), interval(0, h), interval(0, max(w, h)))
-    elif relaxed or abs(sw_w - sw_h) <= max(sw_w, sw_h) * 1e-7:
-        t_plane = _transform_mapping_plane(Rhino.Geometry.Plane.WorldXY, rot, u_off, v_off)
-        mapping = Rhino.Render.TextureMapping.CreateBoxMapping(
-            t_plane, interval(0, w), interval(0, h), interval(0, max(w, h)), True)
-    else:
-        raise RuntimeError("Rectangular swatches on multi-face objects cannot yet be mapped "
-                           "at a verified physical scale. Use a planar surface or a square swatch.")
+    t_plane = _transform_mapping_plane(Rhino.Geometry.Plane.WorldXY, rot, u_off, v_off)
+    mapping = Rhino.Render.TextureMapping.CreateBoxMapping(
+        t_plane, interval(0, w), interval(0, h), interval(0, max(w, h)), True)
     if mapping is None:
-        raise RuntimeError("Rhino could not create the real-world texture mapping.")
+        raise RuntimeError("Rhino could not create the real-world Box texture mapping.")
+    mapping_type = getattr(Rhino.Render, "TextureMappingType", None)
+    box_type = getattr(mapping_type, "Box", None) if mapping_type is not None else None
+    if box_type is not None and mapping.MappingType != box_type:
+        raise RuntimeError("Rhino did not create the requested Box texture mapping.")
     return mapping
 
 
@@ -540,15 +525,18 @@ def apply_target_finish(assignment, mat_info, mapped_ids, target_index=None):
             pass
         oid_key = str(obj.Id)
         if mapped_ids.get(oid_key) != mapping_token:
-            try:
-                live_obj = sc.doc.Objects.FindId(obj.Id) or obj
-                mapping = mapping_for(live_obj, sw_w, sw_h, rotation_deg=rot,
-                                      offset_u_in=off_u, offset_v_in=off_v, relaxed=True)
-                if mapping is not None:
-                    sc.doc.Objects.ModifyTextureMapping(live_obj.Id, 1, mapping)
-                    mapped_ids[oid_key] = mapping_token
-            except Exception:
-                pass
+            live_obj = sc.doc.Objects.FindId(obj.Id) or obj
+            mapping = mapping_for(live_obj, sw_w, sw_h, rotation_deg=rot,
+                                  offset_u_in=off_u, offset_v_in=off_v, relaxed=True)
+            if mapping is None:
+                raise RuntimeError("Rhino could not create the requested Box texture mapping.")
+            if not sc.doc.Objects.ModifyTextureMapping(live_obj.Id, 1, mapping):
+                raise RuntimeError("Rhino could not apply the requested Box texture mapping.")
+            live_obj = sc.doc.Objects.FindId(obj.Id)
+            if live_obj is None:
+                raise RuntimeError("Rhino could not find an object after applying its Box mapping.")
+            verify_object_mapping(live_obj, mapping)
+            mapped_ids[oid_key] = mapping_token
 
 
 def isolate_sku_layer(target_sku, all_sku_layers, target_index=None):
@@ -1110,22 +1098,23 @@ def main():
     print("RENDER_OK %s" % out)
 
 
-try:
-    main()
-except Exception:
-    print("RENDER_FAIL")
-    traceback.print_exc()
+if __name__ == "__main__":
     try:
-        with open(ERROR, "w") as fh:
-            fh.write(traceback.format_exc())
+        main()
     except Exception:
-        pass
-finally:
-    try:
-        sc.doc.Modified = False
-    except Exception:
-        pass
-    try:
-        Rhino.RhinoApp.Exit()
-    except Exception:
-        pass
+        print("RENDER_FAIL")
+        traceback.print_exc()
+        try:
+            with open(ERROR, "w") as fh:
+                fh.write(traceback.format_exc())
+        except Exception:
+            pass
+    finally:
+        try:
+            sc.doc.Modified = False
+        except Exception:
+            pass
+        try:
+            Rhino.RhinoApp.Exit()
+        except Exception:
+            pass
