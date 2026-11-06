@@ -25,9 +25,12 @@ def layer_of(obj):
 
 
 def sku_layer_of(obj):
-    """Return the root parent layer; child sublayer names often repeat per SKU."""
-    full_path, _ = layer_of(obj)
-    return full_path.split("::", 1)[0]
+    """Return the exact block-instance placement layer, not its definition layer.
+
+    The layer hierarchy is evaluated separately by the preview: a hidden parent
+    masks descendants, while definition geometry keeps its own independent layer.
+    """
+    return layer_of(obj)[0]
 
 
 def geometry_kind(geometry):

@@ -63,14 +63,11 @@ function getTexture(url: string, loader: THREE.TextureLoader) {
   return texture;
 }
 
-function layerPrefixes(sku: string, fullLayer: string): string[] {
-  if (!fullLayer || fullLayer === sku) return [];
-  const rooted = fullLayer.startsWith(`${sku}::`);
-  const relative = rooted ? fullLayer.slice(sku.length + 2) : fullLayer;
+function layerPrefixes(fullPath: string): string[] {
   let prefix = "";
-  return relative.split("::").filter(Boolean).map((segment) => {
+  return fullPath.split("::").filter(Boolean).map((segment) => {
     prefix = prefix ? `${prefix}::${segment}` : segment;
-    return rooted ? `${sku}::${prefix}` : prefix;
+    return prefix;
   });
 }
 
@@ -146,56 +143,43 @@ export default function Viewer3D({
   // Visibility is stored per Rhino-like layer node. A hidden SKU root masks its
   // children without changing their individual on/off state, just like Rhino.
   const [hiddenPreviewLayers, setHiddenPreviewLayers] = useState<Record<string, true>>({});
-  const skuNames = [...new Set([
-    ...skuLayerNames.map((name) => name.split("::", 1)[0]),
-    ...items.flatMap((item) => item.skuLayers.map((name) => name.split("::", 1)[0])),
+  const layerNames = [...new Set([
+    ...skuLayerNames,
+    ...items.map((item) => item.layer),
+    ...items.flatMap((item) => item.skuLayers),
   ])].sort((a, b) => a.localeCompare(b));
-  const roots = skuNames.length ? skuNames : ["Model"];
-  const layerPathsBySku = new Map<string, Set<string>>(roots.map((name) => [name, new Set()]));
-  for (const item of items) {
-    const memberships = item.skuLayers.length ? item.skuLayers.map((name) => name.split("::", 1)[0]) : ["Model"];
-    for (const sku of memberships) layerPathsBySku.get(sku)?.add(item.layer);
-  }
-  const layerStateKey = (sku: string, path: string) => JSON.stringify([sku, path]);
-  const layerTree: { sku: string; node: LayerTreeNode }[] = roots.map((sku) => {
-    const root: LayerTreeNode = { path: "$root", label: sku, children: [] };
-    for (const fullPath of [...(layerPathsBySku.get(sku) || [])].sort()) {
-      let branch = root.children;
-      for (const path of layerPrefixes(sku, fullPath)) {
-        let node = branch.find((candidate) => candidate.path === path);
-        if (!node) {
-          node = { path, label: path.split("::").pop() || path, children: [] };
-          branch.push(node);
-        }
-        branch = node.children;
+  const allLayerPaths = [...new Set(layerNames.flatMap(layerPrefixes))].sort((a, b) => a.localeCompare(b));
+  const layerTree: LayerTreeNode[] = [];
+  for (const fullPath of allLayerPaths) {
+    let branch = layerTree;
+    for (const path of layerPrefixes(fullPath)) {
+      let node = branch.find((candidate) => candidate.path === path);
+      if (!node) {
+        node = { path, label: path.split("::").pop() || path, children: [] };
+        branch.push(node);
       }
+      branch = node.children;
     }
-    const sortChildren = (nodes: LayerTreeNode[]) => {
-      nodes.sort((a, b) => a.label.localeCompare(b.label));
-      nodes.forEach((node) => sortChildren(node.children));
-    };
-    sortChildren(root.children);
-    return { sku, node: root };
-  });
-  const allLayerPaths: string[] = [];
-  const collectLayerKeys = (sku: string, node: LayerTreeNode) => {
-    allLayerPaths.push(layerStateKey(sku, node.path));
-    node.children.forEach((child) => collectLayerKeys(sku, child));
+  }
+  const sortChildren = (nodes: LayerTreeNode[]) => {
+    nodes.sort((a, b) => a.label.localeCompare(b.label));
+    nodes.forEach((node) => sortChildren(node.children));
   };
-  layerTree.forEach(({ sku, node }) => collectLayerKeys(sku, node));
-  const isLayerVisible = (sku: string, path: string) =>
-    !hiddenPreviewLayers[layerStateKey(sku, "$root")] &&
-    layerPrefixes(sku, path).every((parent) => !hiddenPreviewLayers[layerStateKey(sku, parent)]);
+  sortChildren(layerTree);
+  const isLayerVisible = (path: string) =>
+    layerPrefixes(path).every((parent) => !hiddenPreviewLayers[parent]);
   const activeScopes = [...new Set(items.flatMap((item) => {
-    const memberships = item.skuLayers.length ? item.skuLayers.map((name) => name.split("::", 1)[0]) : ["Model"];
-    return memberships.filter((sku) => isLayerVisible(sku, item.layer))
-      .map((sku) => JSON.stringify([sku, item.layer]));
+    const instanceLayers = item.skuLayers.length ? item.skuLayers : [item.layer];
+    if (!isLayerVisible(item.layer)) return [];
+    return instanceLayers.filter(isLayerVisible).map((instanceLayer) =>
+      JSON.stringify([instanceLayer, item.layer])
+    );
   }))].sort();
   const activeScopeKey = activeScopes.join("|");
   const hiddenLayerKey = Object.keys(hiddenPreviewLayers).sort().join("|");
   const shownItems = items.filter((item) => {
-    const memberships = item.skuLayers.length ? item.skuLayers.map((name) => name.split("::", 1)[0]) : ["Model"];
-    return memberships.some((sku) => isLayerVisible(sku, item.layer));
+    const instanceLayers = item.skuLayers.length ? item.skuLayers : [item.layer];
+    return isLayerVisible(item.layer) && instanceLayers.some(isLayerVisible);
   });
   const noVisibleSelection = activeScopes.length === 0;
   const selectedKey = [...selected].sort().join("|");
@@ -274,10 +258,7 @@ export default function Viewer3D({
     }
     const params = new URLSearchParams();
     if (canFilterOnServer) {
-      Object.keys(hiddenPreviewLayers).forEach((key) => {
-        const [sku, path] = JSON.parse(key) as [string, string];
-        params.append("hidden_layer", JSON.stringify([sku, path]));
-      });
+      Object.keys(hiddenPreviewLayers).forEach((path) => params.append("hidden_layer", path));
     }
     const url = params.size ? `${sourceUrl}?${params.toString()}` : sourceUrl;
     const controller = new AbortController();
@@ -376,15 +357,15 @@ export default function Viewer3D({
     const partsForItem = (item: ViewerItem) => (geometryById.get(item.id) || []).filter((part) => {
       const partLayer = part.layer || item.layer;
       if (part.sku_layer) {
-        return isLayerVisible(part.sku_layer.split("::", 1)[0], partLayer);
+        return isLayerVisible(part.sku_layer) && isLayerVisible(partLayer);
       }
       if (!skuGeometryReady) {
         // Legacy payloads merged repeated block occurrences. Show their mesh only
-        // when every member layer is on; never leak hidden SKU geometry.
-        const memberships = item.skuLayers.length ? item.skuLayers : ["Model"];
-        return memberships.every((sku) => isLayerVisible(sku.split("::", 1)[0], partLayer));
+        // when every owning instance layer is on; never leak hidden block geometry.
+        const instanceLayers = item.skuLayers.length ? item.skuLayers : [item.layer];
+        return instanceLayers.every(isLayerVisible) && isLayerVisible(partLayer);
       }
-      return skuNames.length === 0 && isLayerVisible("Model", partLayer);
+      return item.skuLayers.length === 0 && isLayerVisible(partLayer);
     });
     const activeItems = noVisibleSelection ? [] : shownItems.filter((item) =>
       geometry === null || partsForItem(item).length > 0
@@ -476,11 +457,9 @@ export default function Viewer3D({
     : status === "error" ? "Geometry could not be loaded — bounding-box fallback"
     : status === "mesh" ? (simulatedGeometry ? "Synthetic test geometry — not Rhino" : partial ? "Stored Rhino tessellation is partial — see analysis warning" : "Rhino tessellated geometry · finish preview is approximate")
     : "Bounding-box fallback — not actual CAD geometry";
-  const renderLayerNode = (sku: string, node: LayerTreeNode, depth: number): any => {
-    const key = layerStateKey(sku, node.path);
-    const color = depth === 0
-      ? items.find((item) => item.skuLayers.includes(sku))?.color || "#71717a"
-      : items.find((item) => item.layer === node.path && item.skuLayers.includes(sku))?.color || "#71717a";
+  const renderLayerNode = (node: LayerTreeNode, depth: number): any => {
+    const key = node.path;
+    const color = items.find((item) => item.layer === node.path || item.skuLayers.includes(node.path))?.color || "#71717a";
     return <div key={key}>
       <label className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-zinc-300 hover:bg-zinc-900"
         style={{ paddingLeft: `${depth * 13 + 6}px` }}>
@@ -491,14 +470,14 @@ export default function Viewer3D({
             return next;
           })} className="accent-amber-500" />
         <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: color }} />
-        <span className="truncate" title={depth === 0 ? sku : node.path}>{node.label}</span>
+        <span className="truncate" title={node.path}>{node.label}</span>
       </label>
-      {node.children.map((child) => renderLayerNode(sku, child, depth + 1))}
+      {node.children.map((child) => renderLayerNode(child, depth + 1))}
     </div>;
   };
   const allScopeCount = new Set(items.flatMap((item) => {
-    const memberships = item.skuLayers.length ? item.skuLayers.map((name) => name.split("::", 1)[0]) : ["Model"];
-    return memberships.map((sku) => JSON.stringify([sku, item.layer]));
+    const instanceLayers = item.skuLayers.length ? item.skuLayers : [item.layer];
+    return instanceLayers.map((instanceLayer) => JSON.stringify([instanceLayer, item.layer]));
   })).size;
   return <div className="relative h-full w-full overflow-hidden"><div ref={hostRef} className="absolute inset-0 overflow-hidden" />
     <div className=" absolute right-4 top-4 z-10 flex flex-col items-end gap-1.5">
@@ -533,7 +512,7 @@ export default function Viewer3D({
           </div>
           <p className="mb-1 px-1.5 text-[10px] text-zinc-500">Turning off a parent hides its descendants; child check states are preserved.</p>
           <div className="max-h-72 space-y-0.5 overflow-y-auto">
-            {layerTree.map(({ sku, node }) => renderLayerNode(sku, node, 0))}
+            {layerTree.map((node) => renderLayerNode(node, 0))}
             {!layerTree.length && <p className="px-1.5 py-2 text-zinc-500">No preview layers available.</p>}
           </div>
         </div>

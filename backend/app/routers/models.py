@@ -171,32 +171,36 @@ def get_model_geometry(model_id: int, request: Request, db: Session = Depends(ge
     sku_filter = set(request.query_params.getlist("sku_layer"))
     layer_filter = set(request.query_params.getlist("layer"))
     hidden = set()
+    legacy_hidden_pairs = set()
     for raw in request.query_params.getlist("hidden_layer"):
         try:
-            pair = json.loads(raw)
-            if isinstance(pair, list) and len(pair) == 2:
-                hidden.add((str(pair[0]), str(pair[1])))
+            parsed = json.loads(raw)
+            if isinstance(parsed, list) and len(parsed) == 2:
+                legacy_hidden_pairs.add((str(parsed[0]), str(parsed[1])))
+                continue
         except ValueError:
-            continue
+            pass
+        hidden.add(raw)
+
+    def path_is_visible(path):
+        parts = [part for part in str(path or "").split("::") if part]
+        return not any("::".join(parts[:i]) in hidden for i in range(1, len(parts) + 1))
 
     def is_visible(part):
-        sku = str(part.get("sku_layer", "")).split("::", 1)[0]
+        instance_layer = str(part.get("sku_layer", ""))
         layer = str(part.get("layer", ""))
+        sku = instance_layer.split("::", 1)[0]
         if sku_filter and sku not in sku_filter:
             return False
         if layer_filter and layer not in layer_filter:
             return False
-        if (sku, "$root") in hidden:
+        if not path_is_visible(instance_layer) or not path_is_visible(layer):
             return False
-        if layer and sku:
-            rooted = layer.startswith(sku + "::")
-            relative = layer[len(sku) + 2:] if rooted else layer
-            prefix = ""
-            for segment in relative.split("::"):
-                prefix = segment if not prefix else prefix + "::" + segment
-                path = sku + "::" + prefix if rooted else prefix
-                if (sku, path) in hidden:
-                    return False
+        if (sku, "$root") in legacy_hidden_pairs:
+            return False
+        for prefix in ["::".join(layer.split("::")[:i]) for i in range(1, len(layer.split("::")) + 1)]:
+            if (sku, prefix) in legacy_hidden_pairs:
+                return False
         return True
 
     if sku_filter or layer_filter or hidden:
