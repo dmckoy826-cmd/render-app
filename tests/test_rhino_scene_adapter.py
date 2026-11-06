@@ -88,14 +88,14 @@ class Instance:
 
 
 class SceneAdapterTests(unittest.TestCase):
-    def load_adapter(self, objects):
+    def load_adapter(self, objects, layers=None):
         geometry = types.SimpleNamespace(Mesh=Mesh, Brep=Brep, Extrusion=Extrusion,
             Surface=Surface, SubD=SubD, Curve=Curve, Transform=Transform)
         rhino = types.SimpleNamespace(Geometry=geometry,
             DocObjects=types.SimpleNamespace(InstanceObject=Instance),
             RhinoMath=types.SimpleNamespace(UnitScale=lambda _a, _b: 0.5),
             UnitSystem=types.SimpleNamespace(Inches="inches"))
-        doc = types.SimpleNamespace(ModelUnitSystem="test units", Layers=[Layer("AFUWK-INNER"), Layer("ROOT")],
+        doc = types.SimpleNamespace(ModelUnitSystem="test units", Layers=layers or [Layer("AFUWK-INNER"), Layer("ROOT")],
             Objects=types.SimpleNamespace(FindId=lambda oid: objects.get(oid)))
         modules = {"Rhino": rhino,
                    "rhinoscriptsyntax": types.SimpleNamespace(AllObjects=lambda: list(objects)),
@@ -129,6 +129,19 @@ class SceneAdapterTests(unittest.TestCase):
         self.assertEqual(preview["positions"][:3], [5, 1.5, 0])
         self.assertEqual(preview["positions"][9:12], [10, 1.5, 0])
         self.assertEqual(preview["triangles"], [0, 1, 2, 3, 4, 5])
+
+    def test_child_layers_are_mapped_to_their_root_sku_layer(self):
+        layers = [Layer("SKU-A::Panels"), Layer("SKU-B::Panels")]
+        objects = {
+            "a": Obj("a", Mesh([(0, 0, 0), (2, 0, 0), (0, 2, 0)], 99), layer=0),
+            "b": Obj("b", Mesh([(0, 0, 0), (2, 0, 0), (0, 2, 0)], 99), layer=1),
+        }
+        scene = self.load_adapter(objects, layers=layers).scan_document()
+        structure = scene.structure("sku.3dm")
+        self.assertEqual({sku["name"] for sku in structure["sku_layers"]}, {"SKU-A", "SKU-B"})
+        self.assertEqual({part["sku_layer"] for part in scene.geometry()["parts"]}, {"SKU-A", "SKU-B"})
+        self.assertEqual({tuple(part["part_layers"]) for part in structure["sku_layers"]},
+                         {("SKU-A::Panels",), ("SKU-B::Panels",)})
 
     def test_scaled_instance_is_reported_for_safe_planning(self):
         inner = Obj("one", Mesh([(0, 0, 0), (1, 0, 0), (0, 1, 0)], 18))

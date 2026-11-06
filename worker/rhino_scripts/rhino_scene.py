@@ -24,6 +24,12 @@ def layer_of(obj):
     return layer.FullPath or layer.Name or "0", "#%02x%02x%02x" % (color.R, color.G, color.B)
 
 
+def sku_layer_of(obj):
+    """Return the root parent layer; child sublayer names often repeat per SKU."""
+    full_path, _ = layer_of(obj)
+    return full_path.split("::", 1)[0]
+
+
 def geometry_kind(geometry):
     g = Rhino.Geometry
     if isinstance(geometry, g.Mesh):
@@ -163,7 +169,8 @@ def scan_document(include_geometry=True):
                 raise ValueError("Block nesting is cyclic or too deep: %s" % name)
             if not ancestors and hasattr(obj, "Attributes") and obj.Attributes is not None:
                 try:
-                    sku_layer, sku_color = layer_of(obj)
+                    sku_layer = sku_layer_of(obj)
+                    _, sku_color = layer_of(obj)
                     builder.add_sku_layer(sku_layer, sku_color, block_name=name)
                 except Exception:
                     pass
@@ -183,7 +190,8 @@ def scan_document(include_geometry=True):
             builder.add_unsupported(layer, ancestors, kind)
             return
         if not ancestors and hasattr(obj, "Attributes") and obj.Attributes is not None:
-            sku_layer, sku_color = info["layer"], info["color"]
+            sku_layer = sku_layer_of(obj)
+            sku_color = info["color"]
             builder.add_sku_layer(sku_layer, sku_color, block_name="")
         if sku_layer:
             builder.add_sku_layer(sku_layer, sku_color, part_layer=info["layer"])
@@ -226,7 +234,7 @@ def scan_document(include_geometry=True):
     for obj in top_objects:
         if obj is not None:
             try:
-                top_layer_names.add(layer_of(obj)[0])
+                top_layer_names.add(sku_layer_of(obj))
             except Exception:
                 pass
     builder.set_preview_sku_count(len(top_layer_names))
