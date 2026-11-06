@@ -187,14 +187,20 @@ def get_model_geometry(model_id: int, request: Request, db: Session = Depends(ge
         return not any("::".join(parts[:i]) in hidden for i in range(1, len(parts) + 1))
 
     def is_visible(part):
-        instance_layer = str(part.get("sku_layer", ""))
+        raw_instance_layers = part.get("instance_layers")
+        if isinstance(raw_instance_layers, list):
+            instance_layers = [str(value) for value in raw_instance_layers if value]
+        else:
+            legacy_instance_layer = str(part.get("sku_layer", ""))
+            instance_layers = [legacy_instance_layer] if legacy_instance_layer else []
         layer = str(part.get("layer", ""))
-        sku = instance_layer.split("::", 1)[0]
-        if sku_filter and sku not in sku_filter:
+        skus = {path.split("::", 1)[0] for path in instance_layers}
+        if sku_filter and not skus.intersection(sku_filter):
             return False
+        sku = instance_layers[0].split("::", 1)[0] if instance_layers else ""
         if layer_filter and layer not in layer_filter:
             return False
-        if not path_is_visible(instance_layer) or not path_is_visible(layer):
+        if not all(path_is_visible(path) for path in instance_layers) or not path_is_visible(layer):
             return False
         if (sku, "$root") in legacy_hidden_pairs:
             return False

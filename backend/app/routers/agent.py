@@ -107,9 +107,15 @@ def _valid_geometry(data: bytes, struct: dict) -> None:
             key, positions = p["id"], p["positions"]
             triangles, lines = p["triangles"], p["lines"]
             sku_layer = p.get("sku_layer", "")
-            identity = (key, sku_layer)
+            instance_layers = p.get("instance_layers")
+            if instance_layers is None:
+                instance_layers = [sku_layer] if sku_layer else []
+            if not isinstance(instance_layers, list) or any(not isinstance(value, str) for value in instance_layers):
+                raise ValueError("invalid instance layer paths")
+            identity = (key, tuple(instance_layers))
             if (key not in known or identity in seen or len(positions) % 3 or
                     len(triangles) % 3 or len(lines) % 2 or
+                    any(path not in known_skus for path in instance_layers) or
                     (sku_layer and sku_layer not in known_skus)):
                 raise ValueError("invalid part identity, SKU layer, or array lengths")
             seen.add(identity)

@@ -89,14 +89,15 @@ class AgentApiTests(unittest.TestCase):
         structure_data = structure()
         structure_data["preview_schema"] = 2
         structure_data["sku_layers"] = [
+            {"name": "ROOT", "part_layers": ["L1", "L2"]},
             {"name": "SKU-A::Body", "part_layers": ["L1"]},
             {"name": "SKU-B::Body", "part_layers": ["L2"]},
         ]
         structure_data["parts"][0]["sku_layers"] = ["SKU-A", "SKU-B"]
         mesh = {"positions": [0, 0, 0, 1, 0, 0, 0, 1, 0], "triangles": [0, 1, 2], "lines": []}
         payload = {"version": 1, "units": "inches", "parts": [
-            {"id": "p1", "layer": "L1", "sku_layer": "SKU-A::Body", **mesh},
-            {"id": "p1", "layer": "L2", "sku_layer": "SKU-B::Body", **mesh},
+            {"id": "p1", "layer": "L1", "sku_layer": "ROOT", "instance_layers": ["ROOT", "SKU-A::Body"], **mesh},
+            {"id": "p1", "layer": "L2", "sku_layer": "ROOT", "instance_layers": ["ROOT", "SKU-B::Body"], **mesh},
         ]}
         response = self.client.post(f"/api/agent/jobs/{job_id}/complete",
             data={"structure": json.dumps(structure_data)},
@@ -105,13 +106,19 @@ class AgentApiTests(unittest.TestCase):
         model = self.client.get(f"/api/models/{model_id}").json()
         api_url = model["structure"]["geometry_api_url"]
         by_sku = self.client.get(api_url, params={"sku_layer": "SKU-B"}).json()
-        self.assertEqual([part["sku_layer"] for part in by_sku["parts"]], ["SKU-B::Body"])
+        self.assertEqual([part["instance_layers"] for part in by_sku["parts"]],
+                         [["ROOT", "SKU-B::Body"]])
         by_layer = self.client.get(api_url, params={"layer": "L1"}).json()
         self.assertEqual([part["layer"] for part in by_layer["parts"]], ["L1"])
         parent_off = self.client.get(api_url, params={"hidden_layer": "SKU-A"}).json()
-        self.assertEqual([part["sku_layer"] for part in parent_off["parts"]], ["SKU-B::Body"])
+        self.assertEqual([part["instance_layers"] for part in parent_off["parts"]],
+                         [["ROOT", "SKU-B::Body"]])
+        nested_instance_off = self.client.get(api_url, params={"hidden_layer": "SKU-A::Body"}).json()
+        self.assertEqual([part["instance_layers"] for part in nested_instance_off["parts"]],
+                         [["ROOT", "SKU-B::Body"]])
         definition_layer_off = self.client.get(api_url, params={"hidden_layer": "L2"}).json()
-        self.assertEqual([part["sku_layer"] for part in definition_layer_off["parts"]], ["SKU-A::Body"])
+        self.assertEqual([part["instance_layers"] for part in definition_layer_off["parts"]],
+                         [["ROOT", "SKU-A::Body"]])
 
     def test_analysis_requires_valid_geometry_and_rejects_bad_indices(self):
         _, job_id = self.job("analyze")

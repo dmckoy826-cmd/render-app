@@ -159,7 +159,8 @@ def scan_document(include_geometry=True):
     if not factor or factor <= 0:
         raise ValueError("The drawing has no valid model units. Set its units in Rhino first.")
 
-    def visit(obj, transform, ancestors, stack, sku_layer=None, sku_color="#8d929a"):
+    def visit(obj, transform, ancestors, stack, instance_layers=None, sku_color="#8d929a"):
+        instance_layers = list(instance_layers or [])
         if (len(builder.occurrences) + len(builder.unsupported) >= MAX_OCCURRENCES or
                 len(builder.parts) >= MAX_PARTS):
             raise ValueError("Model has too many geometry objects for safe analysis.")
@@ -170,17 +171,18 @@ def scan_document(include_geometry=True):
             name = definition.Name
             if len(stack) >= MAX_DEPTH or name in stack:
                 raise ValueError("Block nesting is cyclic or too deep: %s" % name)
-            if not ancestors and hasattr(obj, "Attributes") and obj.Attributes is not None:
+            if hasattr(obj, "Attributes") and obj.Attributes is not None:
                 try:
-                    sku_layer = sku_layer_of(obj)
-                    _, sku_color = layer_of(obj)
-                    builder.add_sku_layer(sku_layer, sku_color, block_name=name)
+                    placement_layer, placement_color = layer_of(obj)
+                    instance_layers.append(placement_layer)
+                    sku_color = placement_color
+                    builder.add_sku_layer(placement_layer, placement_color, block_name=name)
                 except Exception:
                     pass
             builder.add_block(name)
             child_transform = transform * obj.InstanceXform
             for child in definition.GetObjects() or []:
-                visit(child, child_transform, ancestors + [name], stack + [name], sku_layer, sku_color)
+                visit(child, child_transform, ancestors + [name], stack + [name], instance_layers, sku_color)
             return
         owner = ancestors[-1] if ancestors else None
         info = identity(obj, owner)
@@ -193,11 +195,14 @@ def scan_document(include_geometry=True):
             builder.add_unsupported(layer, ancestors, kind)
             return
         if not ancestors and hasattr(obj, "Attributes") and obj.Attributes is not None:
-            sku_layer = sku_layer_of(obj)
-            sku_color = info["color"]
-            builder.add_sku_layer(sku_layer, sku_color, block_name="")
-        if sku_layer:
-            builder.add_sku_layer(sku_layer, sku_color, part_layer=info["layer"])
+            # Top-level ordinary geometry is controlled by its object layer; a
+            # block occurrence instead carries every placement layer encountered.
+            if not instance_layers:
+                instance_layers.append(sku_layer_of(obj))
+                sku_color = info["color"]
+                builder.add_sku_layer(instance_layers[-1], sku_color, block_name="")
+        for placement_layer in instance_layers:
+            builder.add_sku_layer(placement_layer, sku_color, part_layer=info["layer"])
         geometry = obj.Geometry.Duplicate()
         if geometry is None or not geometry.Transform(transform):
             raise ValueError("Could not transform geometry in '%s'." % info["name"])
@@ -211,7 +216,9 @@ def scan_document(include_geometry=True):
         builder.add_leaf(info["key"], info["name"], info["layer"], info["color"], owner,
                          ancestors, bbox, info["renderable"], obj.Id,
                          scaled=has_scaling(transform), positions=positions,
-                         triangles=triangles, lines=lines, sku_layer=sku_layer)
+                         triangles=triangles, lines=lines,
+                         sku_layer=instance_layers[0] if instance_layers else None,
+                         instance_layers=instance_layers)
 
     top_objects = []
     if hasattr(Rhino.DocObjects, "ObjectEnumeratorSettings") and hasattr(sc.doc.Objects, "GetObjectList"):

@@ -231,14 +231,11 @@ export default function ModelWorkspace() {
             : <>Placeholder or older analysis: the viewer shows bounding boxes, not the imported model.
                 Connect the Rhino worker and re-analyze before a real render.</>}
           {model.structure!.geometry_warnings?.map((warning) => <div key={warning} className="mt-1 text-amber-300">{warning}</div>)}
-          {model.structure!.sku_layers?.length && model.structure!.layer_visibility_schema !== "rhino-instance-definition-v1" && <div className="mt-1 text-amber-300">
-            This model’s saved preview predates Rhino instance-vs-definition layer visibility data. Re-analyze once with the updated worker; the cached mesh cannot recover which SKU instance layer each block was placed on.
+          {model.structure!.sku_layers?.length && model.structure!.layer_visibility_schema !== "rhino-instance-definition-v2" && <div className="mt-1 text-amber-300">
+            This model’s saved preview predates exact nested block-instance layer paths. Re-analyze once with the updated worker; cached geometry cannot recover which placement layers each block occurrence used.
           </div>}
           {model.structure!.geometry_status === "partial" && <div className="mt-1 text-zinc-400">
             This warning reports the saved analysis-time tessellation. Preview filters request only enabled SKU/part meshes, but turning layers off cannot change the stored analysis status or recover geometry omitted by the mesh budget. New analyses split that budget fairly across SKU layers.
-          </div>}
-          {model.structure!.sku_layers?.length && model.structure!.preview_schema !== 2 && <div className="mt-1 text-amber-300">
-            Re-analyze this model with the updated Rhino worker to isolate exact geometry per SKU layer. Older previews may combine identical block geometry across SKUs.
           </div>}
           {conflicts > 0 && <div className="mt-1 font-semibold text-amber-300">{conflicts} shared part(s) have conflicting block assignments. The real render will reject them.</div>}
         </div>;
@@ -266,7 +263,7 @@ export default function ModelWorkspace() {
             <Viewer3D items={stableItems} selected={selected} geometryUrl={model.structure?.geometry_url}
               geometryApiUrl={model.structure?.geometry_api_url}
               skuLayerNames={(model.structure?.sku_layers || []).map((sku) => sku.name)}
-              skuGeometryReady={model.structure?.layer_visibility_schema === "rhino-instance-definition-v1"}
+              skuGeometryReady={model.structure?.layer_visibility_schema === "rhino-instance-definition-v2"}
               partial={model.structure?.geometry_status === "partial"}
               simulatedGeometry={!model.structure?.analyzer?.startsWith("rhino") || /fake|stub/i.test(model.structure?.analyzer || "")}
               onSelect={(pid) => setSelected(pid ? new Set([pid]) : new Set())}

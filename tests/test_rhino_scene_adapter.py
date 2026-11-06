@@ -144,6 +144,23 @@ class SceneAdapterTests(unittest.TestCase):
         self.assertEqual({tuple(part["part_layers"]) for part in structure["sku_layers"]},
                          {("SKU-A::Panels",), ("SKU-B::Panels",)})
 
+    def test_nested_block_instance_layers_are_preserved_independently(self):
+        layers = [Layer("Definition::Panels"), Layer("ROOT"),
+                  Layer("SKU Group::SKU-A"), Layer("SKU Group::SKU-B")]
+        definition = Definition("CABINET", [Obj("panel", Mesh([(0, 0, 0), (2, 0, 0), (0, 2, 0)], 81), layer=0)])
+        assembly = Definition("ASSEMBLY", [
+            Instance("nested-a", definition, Transform(x=10), layer=2),
+            Instance("nested-b", definition, Transform(x=20), layer=3),
+        ])
+        root = Instance("root", assembly, Transform(), layer=1)
+        scene = self.load_adapter({"root": root}, layers=layers).scan_document()
+        previews = scene.geometry()["parts"]
+        self.assertEqual({tuple(part["instance_layers"]) for part in previews}, {
+            ("ROOT", "SKU Group::SKU-A"), ("ROOT", "SKU Group::SKU-B")})
+        self.assertEqual({part["layer"] for part in previews}, {"Definition::Panels"})
+        self.assertEqual({sku["name"] for sku in scene.structure("nested.3dm")["sku_layers"]}, {
+            "ROOT", "SKU Group::SKU-A", "SKU Group::SKU-B"})
+
     def test_block_instance_layer_is_separate_from_definition_geometry_layer(self):
         layers = [Layer("Definition::Panels"), Layer("Default"),
                   Layer("SKU Group::SKU-A"), Layer("SKU Group::SKU-B")]

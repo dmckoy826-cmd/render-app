@@ -26,6 +26,7 @@ export interface ViewerItem {
 interface PreviewPart {
   id: string;
   sku_layer?: string;
+  instance_layers?: string[];
   layer?: string;
   bbox?: BBox;
   positions: number[];
@@ -356,8 +357,11 @@ export default function Viewer3D({
     }
     const partsForItem = (item: ViewerItem) => (geometryById.get(item.id) || []).filter((part) => {
       const partLayer = part.layer || item.layer;
-      if (part.sku_layer) {
-        return isLayerVisible(part.sku_layer) && isLayerVisible(partLayer);
+      const instanceLayers = Array.isArray(part.instance_layers)
+        ? part.instance_layers
+        : part.sku_layer ? [part.sku_layer] : [];
+      if (instanceLayers.length) {
+        return instanceLayers.every(isLayerVisible) && isLayerVisible(partLayer);
       }
       if (!skuGeometryReady) {
         // Legacy payloads merged repeated block occurrences. Show their mesh only

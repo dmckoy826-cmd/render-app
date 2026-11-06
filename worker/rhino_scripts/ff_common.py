@@ -92,7 +92,7 @@ class SceneBuilder(object):
 
     def add_leaf(self, key, name, layer, color, owner, ancestors, bbox,
                  renderable, source_id, scaled=False, positions=None,
-                 triangles=None, lines=None, sku_layer=None):
+                 triangles=None, lines=None, sku_layer=None, instance_layers=None):
         part = self.parts.get(key)
         if part is None:
             part = {"id": key, "name": name, "layer": layer, "block": owner,
@@ -109,8 +109,10 @@ class SceneBuilder(object):
         part["block_paths"].add(tuple(ancestors))
         part["occurrence_count"] += 1
         part["source_ids"].add(str(source_id))
-        if sku_layer:
-            part["sku_layers"].add(sku_layer)
+        placement_layers = [str(value) for value in (instance_layers or []) if value]
+        if not placement_layers and sku_layer:
+            placement_layers = [str(sku_layer)]
+        part["sku_layers"].update(placement_layers)
         self.extents = union_bbox(self.extents, bbox)
         self.layers.setdefault(layer, {"name": layer, "color": color, "part_ids": set()})["part_ids"].add(key)
         for block_name in ancestors:
@@ -119,7 +121,8 @@ class SceneBuilder(object):
             self.blocks[block_name]["layers"].add(layer)
             self.blocks[block_name]["part_ids"].add(key)
         self.occurrences.append({"key": key, "layer": layer, "owner": owner,
-                                 "sku_layer": sku_layer or "",
+                                 "sku_layer": placement_layers[0] if placement_layers else "",
+                                 "instance_layers": list(placement_layers),
                                  "ancestors": list(ancestors), "renderable": bool(renderable),
                                  "scaled": bool(scaled), "bbox": bbox})
         if not self.include_geometry:
@@ -129,7 +132,8 @@ class SceneBuilder(object):
             self.partial = True
             self.warn("Some geometry could not be meshed for the interactive preview.")
             return
-        sku_key = sku_layer or ""
+        sku_key = placement_layers[-1] if placement_layers else ""
+        group_key = tuple(placement_layers)
         vertex_count = len(positions) // 3
         index_count = len(triangles) + len(lines)
         sku_vertex_limit = max(1, MAX_PREVIEW_VERTICES // self.preview_sku_count)
@@ -142,11 +146,12 @@ class SceneBuilder(object):
                 sku_indices + index_count > sku_index_limit):
             self.partial = True
             self.warn("The interactive preview geometry budget was reached; some objects were omitted. Each SKU layer has a fair share of the preview budget.")
-            if sku_layer in self.sku_layers:
-                self.sku_layers[sku_layer]["geometry_partial"] = True
+            if sku_key in self.sku_layers:
+                self.sku_layers[sku_key]["geometry_partial"] = True
             return
-        group = part["preview_groups"].setdefault(sku_key, {
+        group = part["preview_groups"].setdefault(group_key, {
             "positions": [], "triangles": [], "lines": [], "bbox": None,
+            "instance_layers": list(placement_layers),
         })
         base = len(group["positions"]) // 3
         group["positions"].extend(positions)
@@ -183,8 +188,8 @@ class SceneBuilder(object):
                       for _, d in sorted(self.sku_layers.items()) if d["part_layers"] or d["blocks"]]
         out = {"units": "inches", "source_file": source_file,
                "analyzer": "rhino8-worker 2.0", "target_schema": SCHEMA,
-               "preview_schema": 3,
-               "layer_visibility_schema": "rhino-instance-definition-v1",
+               "preview_schema": 4,
+               "layer_visibility_schema": "rhino-instance-definition-v2",
                "extents": self.extents, "layers": layers, "blocks": blocks, "parts": parts,
                "geometry_status": "partial" if self.partial else "complete",
                "geometry_warnings": list(self.warnings)}
@@ -195,15 +200,16 @@ class SceneBuilder(object):
     def geometry(self):
         parts = []
         for key in self.order:
-            for sku_layer, group in sorted(self.parts[key]["preview_groups"].items()):
+            for _, group in sorted(self.parts[key]["preview_groups"].items()):
                 if not group["positions"]:
                     continue
                 entry = {"id": key, "layer": self.parts[key]["layer"],
                          "positions": group["positions"],
                          "triangles": group["triangles"], "lines": group["lines"],
-                         "bbox": group["bbox"]}
-                if sku_layer:
-                    entry["sku_layer"] = sku_layer
+                         "bbox": group["bbox"],
+                         "instance_layers": group["instance_layers"]}
+                if group["instance_layers"]:
+                    entry["sku_layer"] = group["instance_layers"][0]
                 parts.append(entry)
         return {"version": 1, "units": "inches", "parts": parts}
 

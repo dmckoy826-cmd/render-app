@@ -64,8 +64,8 @@ class TargetingTests(unittest.TestCase):
         add_part(scene, "same-part", "SHARED", ["SHARED"], source="b", sku_layer="SKU-B")
 
         structure = scene.structure("file.3dm")
-        self.assertEqual(structure["preview_schema"], 3)
-        self.assertEqual(structure["layer_visibility_schema"], "rhino-instance-definition-v1")
+        self.assertEqual(structure["preview_schema"], 4)
+        self.assertEqual(structure["layer_visibility_schema"], "rhino-instance-definition-v2")
         self.assertEqual(structure["parts"][0]["sku_layers"], ["SKU-A", "SKU-B"])
         previews = scene.geometry()["parts"]
         self.assertEqual({p["sku_layer"] for p in previews}, {"SKU-A", "SKU-B"})
