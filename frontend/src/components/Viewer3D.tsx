@@ -26,12 +26,14 @@ export interface ViewerItem {
 interface PreviewPart {
   id: string;
   sku_layer?: string;
+  layer?: string;
   bbox?: BBox;
   positions: number[];
   triangles: number[];
   lines: number[];
 }
 interface PreviewGeometry { version: number; units: string; parts: PreviewPart[] }
+interface LayerTreeNode { path: string; label: string; children: LayerTreeNode[] }
 interface Props {
   items: ViewerItem[];
   selected: Set<string>;
@@ -59,6 +61,17 @@ function getTexture(url: string, loader: THREE.TextureLoader) {
     texCache.set(url, texture);
   }
   return texture;
+}
+
+function layerPrefixes(sku: string, fullLayer: string): string[] {
+  if (!fullLayer || fullLayer === sku) return [];
+  const rooted = fullLayer.startsWith(`${sku}::`);
+  const relative = rooted ? fullLayer.slice(sku.length + 2) : fullLayer;
+  let prefix = "";
+  return relative.split("::").filter(Boolean).map((segment) => {
+    prefix = prefix ? `${prefix}::${segment}` : segment;
+    return rooted ? `${sku}::${prefix}` : prefix;
+  });
 }
 
 function positionsInThree(points: number[], origin: number[]): number[] {
@@ -130,15 +143,61 @@ export default function Viewer3D({
   const [newViewName, setNewViewName] = useState("");
   const [savingView, setSavingView] = useState(false);
   const [layerMenuOpen, setLayerMenuOpen] = useState(false);
-  // null means show every layer; an explicit set lets users isolate any combination.
-  const [visibleLayers, setVisibleLayers] = useState<Set<string> | null>(null);
-  const [visibleSkuLayers, setVisibleSkuLayers] = useState<Set<string> | null>(null);
-  const layerNames = [...new Set(items.map((item) => item.layer))].sort((a, b) => a.localeCompare(b));
-  const skuNames = [...new Set(skuLayerNames)].sort((a, b) => a.localeCompare(b));
-  const visibleLayerKey = visibleLayers === null ? "*" : [...visibleLayers].sort().join("|");
-  const visibleSkuKey = visibleSkuLayers === null ? "*" : [...visibleSkuLayers].sort().join("|");
-  const shownItems = items.filter((item) => visibleLayers === null || visibleLayers.has(item.layer));
-  const noVisibleSelection = visibleLayers?.size === 0 || visibleSkuLayers?.size === 0;
+  // Visibility is stored per Rhino-like layer node. A hidden SKU root masks its
+  // children without changing their individual on/off state, just like Rhino.
+  const [hiddenPreviewLayers, setHiddenPreviewLayers] = useState<Record<string, true>>({});
+  const skuNames = [...new Set([
+    ...skuLayerNames.map((name) => name.split("::", 1)[0]),
+    ...items.flatMap((item) => item.skuLayers.map((name) => name.split("::", 1)[0])),
+  ])].sort((a, b) => a.localeCompare(b));
+  const roots = skuNames.length ? skuNames : ["Model"];
+  const layerPathsBySku = new Map<string, Set<string>>(roots.map((name) => [name, new Set()]));
+  for (const item of items) {
+    const memberships = item.skuLayers.length ? item.skuLayers.map((name) => name.split("::", 1)[0]) : ["Model"];
+    for (const sku of memberships) layerPathsBySku.get(sku)?.add(item.layer);
+  }
+  const layerStateKey = (sku: string, path: string) => JSON.stringify([sku, path]);
+  const layerTree: { sku: string; node: LayerTreeNode }[] = roots.map((sku) => {
+    const root: LayerTreeNode = { path: "$root", label: sku, children: [] };
+    for (const fullPath of [...(layerPathsBySku.get(sku) || [])].sort()) {
+      let branch = root.children;
+      for (const path of layerPrefixes(sku, fullPath)) {
+        let node = branch.find((candidate) => candidate.path === path);
+        if (!node) {
+          node = { path, label: path.split("::").pop() || path, children: [] };
+          branch.push(node);
+        }
+        branch = node.children;
+      }
+    }
+    const sortChildren = (nodes: LayerTreeNode[]) => {
+      nodes.sort((a, b) => a.label.localeCompare(b.label));
+      nodes.forEach((node) => sortChildren(node.children));
+    };
+    sortChildren(root.children);
+    return { sku, node: root };
+  });
+  const allLayerPaths: string[] = [];
+  const collectLayerKeys = (sku: string, node: LayerTreeNode) => {
+    allLayerPaths.push(layerStateKey(sku, node.path));
+    node.children.forEach((child) => collectLayerKeys(sku, child));
+  };
+  layerTree.forEach(({ sku, node }) => collectLayerKeys(sku, node));
+  const isLayerVisible = (sku: string, path: string) =>
+    !hiddenPreviewLayers[layerStateKey(sku, "$root")] &&
+    layerPrefixes(sku, path).every((parent) => !hiddenPreviewLayers[layerStateKey(sku, parent)]);
+  const activeScopes = [...new Set(items.flatMap((item) => {
+    const memberships = item.skuLayers.length ? item.skuLayers.map((name) => name.split("::", 1)[0]) : ["Model"];
+    return memberships.filter((sku) => isLayerVisible(sku, item.layer))
+      .map((sku) => JSON.stringify([sku, item.layer]));
+  }))].sort();
+  const activeScopeKey = activeScopes.join("|");
+  const hiddenLayerKey = Object.keys(hiddenPreviewLayers).sort().join("|");
+  const shownItems = items.filter((item) => {
+    const memberships = item.skuLayers.length ? item.skuLayers.map((name) => name.split("::", 1)[0]) : ["Model"];
+    return memberships.some((sku) => isLayerVisible(sku, item.layer));
+  });
+  const noVisibleSelection = activeScopes.length === 0;
   const selectedKey = [...selected].sort().join("|");
   const onSelectRef = useRef(onSelect);
   onSelectRef.current = onSelect;
@@ -208,15 +267,17 @@ export default function Viewer3D({
     const canFilterOnServer = !!(skuGeometryReady && geometryApiUrl);
     const sourceUrl = canFilterOnServer ? geometryApiUrl : geometryUrl;
     if (!sourceUrl) { setGeometry(null); setStatus("box"); return; }
-    if (visibleLayers?.size === 0 || visibleSkuLayers?.size === 0) {
+    if (noVisibleSelection) {
       setGeometry({ version: 1, units: "inches", parts: [] });
       setStatus("mesh");
       return;
     }
     const params = new URLSearchParams();
     if (canFilterOnServer) {
-      if (visibleSkuLayers !== null) visibleSkuLayers.forEach((name) => params.append("sku_layer", name));
-      if (visibleLayers !== null) visibleLayers.forEach((name) => params.append("layer", name));
+      Object.keys(hiddenPreviewLayers).forEach((key) => {
+        const [sku, path] = JSON.parse(key) as [string, string];
+        params.append("hidden_layer", JSON.stringify([sku, path]));
+      });
     }
     const url = params.size ? `${sourceUrl}?${params.toString()}` : sourceUrl;
     const controller = new AbortController();
@@ -228,7 +289,7 @@ export default function Viewer3D({
       setGeometry(data); setStatus("mesh");
     }).catch((err) => { if (err.name !== "AbortError") setStatus("error"); });
     return () => controller.abort();
-  }, [geometryUrl, geometryApiUrl, skuGeometryReady, visibleLayerKey, visibleSkuKey]);
+  }, [geometryUrl, geometryApiUrl, skuGeometryReady, activeScopeKey, hiddenLayerKey]);
 
   useEffect(() => {
     const host = hostRef.current!;
@@ -313,14 +374,20 @@ export default function Viewer3D({
       geometryById.set(part.id, list);
     }
     const partsForItem = (item: ViewerItem) => (geometryById.get(item.id) || []).filter((part) => {
-      if (visibleSkuLayers === null) return true;
-      if (part.sku_layer) return visibleSkuLayers.has(part.sku_layer.split("::", 1)[0]);
-      // Old cached previews merged identical parts from multiple SKU instances.
-      // Never substitute shared sublayer geometry for an exact SKU-layer selection.
-      return false;
+      const partLayer = part.layer || item.layer;
+      if (part.sku_layer) {
+        return isLayerVisible(part.sku_layer.split("::", 1)[0], partLayer);
+      }
+      if (!skuGeometryReady) {
+        // Legacy payloads merged repeated block occurrences. Show their mesh only
+        // when every member layer is on; never leak hidden SKU geometry.
+        const memberships = item.skuLayers.length ? item.skuLayers : ["Model"];
+        return memberships.every((sku) => isLayerVisible(sku.split("::", 1)[0], partLayer));
+      }
+      return skuNames.length === 0 && isLayerVisible("Model", partLayer);
     });
     const activeItems = noVisibleSelection ? [] : shownItems.filter((item) =>
-      visibleSkuLayers === null || partsForItem(item).length > 0
+      geometry === null || partsForItem(item).length > 0
     );
     if (!activeItems.length) return;
     const min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
@@ -342,7 +409,7 @@ export default function Viewer3D({
     const radius = Math.hypot(max[0] - min[0], max[1] - min[1], max[2] - min[2]) / 2 || 50;
     st.origin = origin;
     st.radius = radius;
-    const showBoxes = !geometry && visibleSkuLayers === null;
+    const showBoxes = !geometry && Object.keys(hiddenPreviewLayers).length === 0;
     for (const item of activeItems) {
       const previewParts = partsForItem(item);
       const isSelected = selected.has(item.id);
@@ -393,7 +460,7 @@ export default function Viewer3D({
         edges.position.copy(box.position); group.add(edges);
       }
     }
-    const frameKey = `${geometryUrl || "boxes"}:${min.join(",")}:${max.join(",")}:${activeItems.map((i) => i.id).join("|")}:${visibleSkuKey}`;
+    const frameKey = `${geometryUrl || "boxes"}:${min.join(",")}:${max.join(",")}:${activeItems.map((i) => i.id).join("|")}:${activeScopeKey}`;
     if (st.framed !== frameKey) {
       camera.position.set(radius * 1.5, radius * 1.05, -radius * 1.5);
       camera.near = Math.max(radius / 10000, 0.001); camera.far = Math.max(radius * 100, 10000);
@@ -401,14 +468,38 @@ export default function Viewer3D({
       st.framed = frameKey;
       emitCameraPose();
     }
-  }, [items, geometry, geometryUrl, selectedKey, visibleLayerKey, visibleSkuKey, skuGeometryReady]);
+  }, [items, geometry, geometryUrl, selectedKey, activeScopeKey, hiddenLayerKey, skuGeometryReady]);
 
   const label = noVisibleSelection || shownItems.length === 0 ? "No preview geometry visible — turn on a SKU or part layer"
-    : visibleSkuLayers !== null && !skuGeometryReady ? "Re-analyze this model to isolate geometry by SKU layer"
+    : hiddenLayerKey && !skuGeometryReady ? "Re-analyze this model to isolate geometry by SKU layer"
     : status === "loading" ? "Loading Rhino geometry… (boxes shown temporarily)"
     : status === "error" ? "Geometry could not be loaded — bounding-box fallback"
     : status === "mesh" ? (simulatedGeometry ? "Synthetic test geometry — not Rhino" : partial ? "Stored Rhino tessellation is partial — see analysis warning" : "Rhino tessellated geometry · finish preview is approximate")
     : "Bounding-box fallback — not actual CAD geometry";
+  const renderLayerNode = (sku: string, node: LayerTreeNode, depth: number): any => {
+    const key = layerStateKey(sku, node.path);
+    const color = depth === 0
+      ? items.find((item) => item.skuLayers.includes(sku))?.color || "#71717a"
+      : items.find((item) => item.layer === node.path && item.skuLayers.includes(sku))?.color || "#71717a";
+    return <div key={key}>
+      <label className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-zinc-300 hover:bg-zinc-900"
+        style={{ paddingLeft: `${depth * 13 + 6}px` }}>
+        <input type="checkbox" checked={!hiddenPreviewLayers[key]}
+          onChange={() => setHiddenPreviewLayers((current) => {
+            const next = { ...current };
+            if (next[key]) delete next[key]; else next[key] = true;
+            return next;
+          })} className="accent-amber-500" />
+        <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: color }} />
+        <span className="truncate" title={depth === 0 ? sku : node.path}>{node.label}</span>
+      </label>
+      {node.children.map((child) => renderLayerNode(sku, child, depth + 1))}
+    </div>;
+  };
+  const allScopeCount = new Set(items.flatMap((item) => {
+    const memberships = item.skuLayers.length ? item.skuLayers.map((name) => name.split("::", 1)[0]) : ["Model"];
+    return memberships.map((sku) => JSON.stringify([sku, item.layer]));
+  })).size;
   return <div className="relative h-full w-full overflow-hidden"><div ref={hostRef} className="absolute inset-0 overflow-hidden" />
     <div className=" absolute right-4 top-4 z-10 flex flex-col items-end gap-1.5">
       <div className="flex flex-wrap items-center gap-1 rounded-lg border border-zinc-800/90 bg-zinc-950/85 p-1 text-[11px] backdrop-blur">
@@ -420,9 +511,9 @@ export default function Viewer3D({
           </button>
         ))}
         <button onClick={() => setLayerMenuOpen((open) => !open)}
-          className={`ml-1 rounded border px-2 py-1 ${(visibleLayers !== null && visibleLayers.size !== layerNames.length) || (visibleSkuLayers !== null && visibleSkuLayers.size !== skuNames.length) ? "border-amber-500/50 text-amber-300" : "border-zinc-700 text-zinc-300"} hover:bg-zinc-800`}
-          title="Choose which model layers are visible in the preview">
-          SKU {visibleSkuLayers === null ? skuNames.length : visibleSkuLayers.size}/{skuNames.length} · Parts {visibleLayers === null ? layerNames.length : visibleLayers.size}/{layerNames.length}
+          className={`ml-1 rounded border px-2 py-1 ${hiddenLayerKey ? "border-amber-500/50 text-amber-300" : "border-zinc-700 text-zinc-300"} hover:bg-zinc-800`}
+          title="Rhino-style hierarchical layer visibility">
+          Rhino Layers {activeScopes.length}/{allScopeCount}
         </button>
         {onSaveView && (
           <button onClick={() => setSavingView((v) => !v)}
@@ -432,48 +523,18 @@ export default function Viewer3D({
         )}
       </div>
       {layerMenuOpen && (
-        <div className="w-64 rounded-lg border border-zinc-800 bg-zinc-950/95 p-2 text-xs shadow-xl backdrop-blur">
+        <div className="w-72 rounded-lg border border-zinc-800 bg-zinc-950/95 p-2 text-xs shadow-xl backdrop-blur">
           <div className="mb-2 flex items-center justify-between border-b border-zinc-800 pb-2">
-            <span className="font-medium text-zinc-200">Preview visibility</span>
+            <span className="font-medium text-zinc-200">Rhino layer visibility</span>
             <div className="flex gap-1">
-              <button onClick={() => { setVisibleLayers(null); setVisibleSkuLayers(null); }} className="rounded px-1.5 py-1 text-amber-300 hover:bg-zinc-800">All on</button>
-              <button onClick={() => { setVisibleLayers(new Set()); setVisibleSkuLayers(new Set()); }} className="rounded px-1.5 py-1 text-zinc-400 hover:bg-zinc-800">All off</button>
+              <button onClick={() => setHiddenPreviewLayers({})} className="rounded px-1.5 py-1 text-amber-300 hover:bg-zinc-800">All on</button>
+              <button onClick={() => setHiddenPreviewLayers(Object.fromEntries(allLayerPaths.map((key) => [key, true])) as Record<string, true>)} className="rounded px-1.5 py-1 text-zinc-400 hover:bg-zinc-800">All off</button>
             </div>
           </div>
-          {skuNames.length > 0 && <>
-            <div className="mb-1 mt-2 text-[10px] font-semibold uppercase tracking-wide text-amber-300">SKU Layers</div>
-            <div className="max-h-36 space-y-0.5 overflow-y-auto">
-              {skuNames.map((name) => {
-                const checked = visibleSkuLayers === null || visibleSkuLayers.has(name);
-                const color = items.find((item) => item.skuLayers.includes(name))?.color || "#71717a";
-                return <label key={name} className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-zinc-300 hover:bg-zinc-900">
-                  <input type="checkbox" checked={checked} onChange={() => setVisibleSkuLayers((current) => {
-                    const next = current === null ? new Set(skuNames) : new Set(current);
-                    if (next.has(name)) next.delete(name); else next.add(name);
-                    return next.size === skuNames.length ? null : next;
-                  })} className="accent-amber-500" />
-                  <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: color }} />
-                  <span className="truncate" title={name}>{name}</span>
-                </label>;
-              })}
-            </div>
-          </>}
-          <div className="mb-1 mt-2 text-[10px] font-semibold uppercase tracking-wide text-zinc-400">Part Layers</div>
-          <div className="max-h-36 space-y-0.5 overflow-y-auto">
-            {layerNames.map((name) => {
-              const checked = visibleLayers === null || visibleLayers.has(name);
-              const color = items.find((item) => item.layer === name)?.color || "#71717a";
-              return <label key={name} className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-zinc-300 hover:bg-zinc-900">
-                <input type="checkbox" checked={checked} onChange={() => setVisibleLayers((current) => {
-                  const next = current === null ? new Set(layerNames) : new Set(current);
-                  if (next.has(name)) next.delete(name); else next.add(name);
-                  return next.size === layerNames.length ? null : next;
-                })} className="accent-amber-500" />
-                <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: color }} />
-                <span className="truncate" title={name}>{name}</span>
-              </label>;
-            })}
-            {!layerNames.length && <p className="px-1.5 py-2 text-zinc-500">No preview layers available.</p>}
+          <p className="mb-1 px-1.5 text-[10px] text-zinc-500">Turning off a parent hides its descendants; child check states are preserved.</p>
+          <div className="max-h-72 space-y-0.5 overflow-y-auto">
+            {layerTree.map(({ sku, node }) => renderLayerNode(sku, node, 0))}
+            {!layerTree.length && <p className="px-1.5 py-2 text-zinc-500">No preview layers available.</p>}
           </div>
         </div>
       )}

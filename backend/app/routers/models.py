@@ -170,10 +170,37 @@ def get_model_geometry(model_id: int, request: Request, db: Session = Depends(ge
         raise HTTPException(500, "preview geometry could not be read") from exc
     sku_filter = set(request.query_params.getlist("sku_layer"))
     layer_filter = set(request.query_params.getlist("layer"))
-    if sku_filter or layer_filter:
-        payload["parts"] = [part for part in payload.get("parts", [])
-                             if (not sku_filter or str(part.get("sku_layer", "")).split("::", 1)[0] in sku_filter)
-                             and (not layer_filter or part.get("layer") in layer_filter)]
+    hidden = set()
+    for raw in request.query_params.getlist("hidden_layer"):
+        try:
+            pair = json.loads(raw)
+            if isinstance(pair, list) and len(pair) == 2:
+                hidden.add((str(pair[0]), str(pair[1])))
+        except ValueError:
+            continue
+
+    def is_visible(part):
+        sku = str(part.get("sku_layer", "")).split("::", 1)[0]
+        layer = str(part.get("layer", ""))
+        if sku_filter and sku not in sku_filter:
+            return False
+        if layer_filter and layer not in layer_filter:
+            return False
+        if (sku, "$root") in hidden:
+            return False
+        if layer and sku:
+            rooted = layer.startswith(sku + "::")
+            relative = layer[len(sku) + 2:] if rooted else layer
+            prefix = ""
+            for segment in relative.split("::"):
+                prefix = segment if not prefix else prefix + "::" + segment
+                path = sku + "::" + prefix if rooted else prefix
+                if (sku, path) in hidden:
+                    return False
+        return True
+
+    if sku_filter or layer_filter or hidden:
+        payload["parts"] = [part for part in payload.get("parts", []) if is_visible(part)]
     return payload
 
 

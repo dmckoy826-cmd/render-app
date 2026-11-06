@@ -108,6 +108,14 @@ class AgentApiTests(unittest.TestCase):
         self.assertEqual([part["sku_layer"] for part in by_sku["parts"]], ["SKU-B::Body"])
         by_layer = self.client.get(api_url, params={"layer": "L1"}).json()
         self.assertEqual([part["layer"] for part in by_layer["parts"]], ["L1"])
+        parent_off = self.client.get(api_url, params={
+            "hidden_layer": json.dumps(["SKU-A", "$root"])
+        }).json()
+        self.assertEqual([part["sku_layer"] for part in parent_off["parts"]], ["SKU-B::Body"])
+        child_off = self.client.get(api_url, params={
+            "hidden_layer": json.dumps(["SKU-B", "L2"])
+        }).json()
+        self.assertEqual([part["sku_layer"] for part in child_off["parts"]], ["SKU-A::Body"])
 
     def test_analysis_requires_valid_geometry_and_rejects_bad_indices(self):
         _, job_id = self.job("analyze")
