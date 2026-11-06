@@ -962,16 +962,26 @@ def run_batch(batch_cfg, renderer, vray, structure=None):
 
             png_name = sanitize_filename(label) + ".png"
             dest_png = os.path.join(sku_dir, png_name)
-            if os.path.exists(dest_png):
-                os.remove(dest_png)
-            configure_camera_and_output(vray, sku_dir, png_name)
+            temp_png_name = "batch_frame_%d_%d.png" % (sku_i, var_i)
+            temp_png = os.path.join(OUT_DIR, temp_png_name)
+            if os.path.exists(temp_png):
+                os.remove(temp_png)
+            # Always let V-Ray write into temporary OUT_DIR so V-Ray's Frame Buffer
+            # never holds a Windows directory lock on the user's output folder.
+            configure_camera_and_output(vray, OUT_DIR, temp_png_name)
             vray.Render(0, 0, -1)
-            if not os.path.isfile(dest_png) or os.path.getsize(dest_png) == 0:
-                rs.Command('-_SaveRenderWindowAs "%s" _Enter' % dest_png, False)
-            if not os.path.isfile(dest_png) or os.path.getsize(dest_png) == 0:
+            if not os.path.isfile(temp_png) or os.path.getsize(temp_png) == 0:
+                rs.Command('-_SaveRenderWindowAs "%s" _Enter' % temp_png, False)
+            if not os.path.isfile(temp_png) or os.path.getsize(temp_png) == 0:
                 raise RuntimeError("V-Ray did not save %s for SKU '%s'." % (png_name, sku_layer))
+            if os.path.exists(dest_png):
+                try:
+                    os.remove(dest_png)
+                except Exception:
+                    pass
+            shutil.copyfile(temp_png, dest_png)
             saved_files.append(dest_png)
-            last_png = dest_png
+            last_png = temp_png
             done_count += 1
 
     out = os.path.join(OUT_DIR, "render.png")
