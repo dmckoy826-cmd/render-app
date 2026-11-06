@@ -200,7 +200,7 @@ def scan_document(include_geometry=True):
         builder.add_leaf(info["key"], info["name"], info["layer"], info["color"], owner,
                          ancestors, bbox, info["renderable"], obj.Id,
                          scaled=has_scaling(transform), positions=positions,
-                         triangles=triangles, lines=lines)
+                         triangles=triangles, lines=lines, sku_layer=sku_layer)
 
     top_objects = []
     if hasattr(Rhino.DocObjects, "ObjectEnumeratorSettings") and hasattr(sc.doc.Objects, "GetObjectList"):
@@ -220,6 +220,16 @@ def scan_document(include_geometry=True):
             obj = sc.doc.Objects.FindId(oid)
             if obj is not None:
                 top_objects.append(obj)
+    # Divide the preview geometry budget across top-level SKU layers so an early
+    # dense SKU cannot consume the entire interactive preview payload.
+    top_layer_names = set()
+    for obj in top_objects:
+        if obj is not None:
+            try:
+                top_layer_names.add(layer_of(obj)[0])
+            except Exception:
+                pass
+    builder.set_preview_sku_count(len(top_layer_names))
     for obj in top_objects:
         if obj is not None:
             visit(obj, Rhino.Geometry.Transform.Identity, [], [])

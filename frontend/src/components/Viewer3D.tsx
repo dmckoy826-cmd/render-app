@@ -7,6 +7,7 @@ export interface ViewerItem {
   id: string;
   name: string;
   layer: string;
+  skuLayers: string[];
   bbox: BBox;
   finish: {
     url: string;
@@ -22,15 +23,25 @@ export interface ViewerItem {
   rbe: boolean;
   conflict?: boolean;
 }
-interface PreviewPart { id: string; positions: number[]; triangles: number[]; lines: number[] }
+interface PreviewPart {
+  id: string;
+  sku_layer?: string;
+  bbox?: BBox;
+  positions: number[];
+  triangles: number[];
+  lines: number[];
+}
 interface PreviewGeometry { version: number; units: string; parts: PreviewPart[] }
 interface Props {
   items: ViewerItem[];
   selected: Set<string>;
   onSelect: (id: string | null) => void;
   geometryUrl?: string;
+  geometryApiUrl?: string;
   partial?: boolean;
   simulatedGeometry?: boolean;
+  skuLayerNames?: string[];
+  skuGeometryReady?: boolean;
   onCameraChange?: (pose: CameraPose) => void;
   savedViews?: SavedCameraView[];
   onSaveView?: (name: string, pose: CameraPose) => void;
@@ -104,7 +115,8 @@ function meshGeometry(part: PreviewPart, finish: ViewerItem["finish"], origin: n
 
 /** Rhino model space (x, y, z-up inches) -> Three.js (x, z, -y). */
 export default function Viewer3D({
-  items, selected, onSelect, geometryUrl, partial, simulatedGeometry,
+  items, selected, onSelect, geometryUrl, geometryApiUrl, partial, simulatedGeometry,
+  skuLayerNames = [], skuGeometryReady = false,
   onCameraChange, savedViews = [], onSaveView, onDeleteView,
 }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
@@ -120,9 +132,15 @@ export default function Viewer3D({
   const [layerMenuOpen, setLayerMenuOpen] = useState(false);
   // null means show every layer; an explicit set lets users isolate any combination.
   const [visibleLayers, setVisibleLayers] = useState<Set<string> | null>(null);
+  const [visibleSkuLayers, setVisibleSkuLayers] = useState<Set<string> | null>(null);
   const layerNames = [...new Set(items.map((item) => item.layer))].sort((a, b) => a.localeCompare(b));
+  const skuNames = [...new Set(skuLayerNames)].sort((a, b) => a.localeCompare(b));
   const visibleLayerKey = visibleLayers === null ? "*" : [...visibleLayers].sort().join("|");
-  const shownItems = visibleLayers === null ? items : items.filter((item) => visibleLayers.has(item.layer));
+  const visibleSkuKey = visibleSkuLayers === null ? "*" : [...visibleSkuLayers].sort().join("|");
+  const shownItems = items.filter((item) =>
+    (visibleLayers === null || visibleLayers.has(item.layer)) &&
+    (visibleSkuLayers === null || (item.skuLayers || []).some((name) => visibleSkuLayers.has(name)))
+  );
   const selectedKey = [...selected].sort().join("|");
   const onSelectRef = useRef(onSelect);
   onSelectRef.current = onSelect;
@@ -189,17 +207,30 @@ export default function Viewer3D({
   };
 
   useEffect(() => {
-    if (!geometryUrl) { setGeometry(null); setStatus("box"); return; }
+    const canFilterOnServer = !!(skuGeometryReady && geometryApiUrl);
+    const sourceUrl = canFilterOnServer ? geometryApiUrl : geometryUrl;
+    if (!sourceUrl) { setGeometry(null); setStatus("box"); return; }
+    if (visibleLayers?.size === 0 || visibleSkuLayers?.size === 0) {
+      setGeometry({ version: 1, units: "inches", parts: [] });
+      setStatus("mesh");
+      return;
+    }
+    const params = new URLSearchParams();
+    if (canFilterOnServer) {
+      if (visibleSkuLayers !== null) visibleSkuLayers.forEach((name) => params.append("sku_layer", name));
+      if (visibleLayers !== null) visibleLayers.forEach((name) => params.append("layer", name));
+    }
+    const url = params.size ? `${sourceUrl}?${params.toString()}` : sourceUrl;
     const controller = new AbortController();
     setGeometry(null); setStatus("loading");
-    fetch(geometryUrl, { signal: controller.signal }).then(async (response) => {
+    fetch(url, { signal: controller.signal }).then(async (response) => {
       if (!response.ok) throw new Error("geometry unavailable");
       const data: PreviewGeometry = await response.json();
       if (data.version !== 1 || data.units !== "inches" || !Array.isArray(data.parts)) throw new Error("bad geometry");
       setGeometry(data); setStatus("mesh");
     }).catch((err) => { if (err.name !== "AbortError") setStatus("error"); });
     return () => controller.abort();
-  }, [geometryUrl]);
+  }, [geometryUrl, geometryApiUrl, skuGeometryReady, visibleLayerKey, visibleSkuKey]);
 
   useEffect(() => {
     const host = hostRef.current!;
@@ -277,39 +308,63 @@ export default function Viewer3D({
       if (Array.isArray(material)) material.forEach((m) => m.dispose()); else material?.dispose();
     }
     if (!shownItems.length) return;
+    const geometryById = new Map<string, PreviewPart[]>();
+    for (const part of geometry?.parts || []) {
+      const list = geometryById.get(part.id) || [];
+      list.push(part);
+      geometryById.set(part.id, list);
+    }
+    const partsForItem = (item: ViewerItem) => (geometryById.get(item.id) || []).filter((part) => {
+      if (visibleSkuLayers === null) return true;
+      if (part.sku_layer) return visibleSkuLayers.has(part.sku_layer);
+      // Old cached previews merged identical parts from multiple SKU instances. Do
+      // not show that ambiguous geometry when a specific SKU has been selected.
+      return skuGeometryReady && item.skuLayers.length === 1 && visibleSkuLayers.has(item.skuLayers[0]);
+    });
     const min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
-    for (const item of shownItems) for (let i = 0; i < 3; i++) {
-      min[i] = Math.min(min[i], item.bbox.min[i]); max[i] = Math.max(max[i], item.bbox.max[i]);
+    for (const item of shownItems) {
+      const matchedParts = partsForItem(item);
+      const bounds = matchedParts.map((part) => part.bbox).filter((box): box is BBox => !!box);
+      if (bounds.length) {
+        for (const box of bounds) for (let i = 0; i < 3; i++) {
+          min[i] = Math.min(min[i], box.min[i]); max[i] = Math.max(max[i], box.max[i]);
+        }
+      } else {
+        for (let i = 0; i < 3; i++) {
+          min[i] = Math.min(min[i], item.bbox.min[i]); max[i] = Math.max(max[i], item.bbox.max[i]);
+        }
+      }
     }
     // Recenter before converting to float32 so large CAD coordinates retain detail.
     const origin = min.map((v, i) => (v + max[i]) / 2) as [number, number, number];
     const radius = Math.hypot(max[0] - min[0], max[1] - min[1], max[2] - min[2]) / 2 || 50;
     st.origin = origin;
     st.radius = radius;
-    const geometryById = new Map((geometry?.parts || []).map((part) => [part.id, part]));
-    const showBoxes = !geometry;
+    const showBoxes = !geometry && visibleSkuLayers === null;
     for (const item of shownItems) {
-      const part = geometryById.get(item.id);
+      const previewParts = partsForItem(item);
       const isSelected = selected.has(item.id);
-      if (part && part.positions.length && part.triangles.length) {
-        const geo = meshGeometry(part, item.finish, origin);
-        const mat = new THREE.MeshStandardMaterial({
-          color: item.finish ? 0xffffff : new THREE.Color(item.color),
-          map: item.finish ? getTexture(item.finish.url, loader) : null,
-          roughness: item.finish?.metallic ? 0.35 : 0.8,
-          metalness: item.finish?.metallic ? 0.6 : 0.02,
-          emissive: isSelected ? 0x704600 : item.rbe ? 0x052027 : 0x000000,
-          side: THREE.DoubleSide,
-        });
-        const mesh = new THREE.Mesh(geo, mat);
-        mesh.userData.partId = item.id; group.add(mesh);
-      }
-      if (part && part.positions.length && part.lines.length) {
-        const geo = new THREE.BufferGeometry();
-        geo.setAttribute("position", new THREE.Float32BufferAttribute(positionsInThree(part.positions, origin), 3));
-        geo.setIndex(part.lines);
-        const lines = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: isSelected ? 0xf59e0b : item.color }));
-        lines.userData.partId = item.id; group.add(lines);
+      for (const part of previewParts) {
+        if (part.positions.length && part.triangles.length) {
+          const geo = meshGeometry(part, item.finish, origin);
+          const mat = new THREE.MeshStandardMaterial({
+            color: item.finish ? 0xffffff : new THREE.Color(item.color),
+            map: item.finish ? getTexture(item.finish.url, loader) : null,
+            roughness: item.finish?.metallic ? 0.35 : 0.8,
+            metalness: item.finish?.metallic ? 0.6 : 0.02,
+            emissive: isSelected ? 0x704600 : item.rbe ? 0x052027 : 0x000000,
+            side: THREE.DoubleSide,
+          });
+          const mesh = new THREE.Mesh(geo, mat);
+          mesh.userData.partId = item.id; group.add(mesh);
+        }
+        if (part.positions.length && part.lines.length) {
+          const geo = new THREE.BufferGeometry();
+          geo.setAttribute("position", new THREE.Float32BufferAttribute(positionsInThree(part.positions, origin), 3));
+          geo.setIndex(part.lines);
+          const lines = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: isSelected ? 0xf59e0b : item.color }));
+          lines.userData.partId = item.id; group.add(lines);
+        }
       }
       if (showBoxes) {
         const [x0, y0, z0] = item.bbox.min, [x1, y1, z1] = item.bbox.max;
@@ -336,7 +391,7 @@ export default function Viewer3D({
         edges.position.copy(box.position); group.add(edges);
       }
     }
-    const frameKey = `${geometryUrl || "boxes"}:${min.join(",")}:${max.join(",")}:${shownItems.map((i) => i.id).join("|")}`;
+    const frameKey = `${geometryUrl || "boxes"}:${min.join(",")}:${max.join(",")}:${shownItems.map((i) => i.id).join("|")}:${visibleSkuKey}`;
     if (st.framed !== frameKey) {
       camera.position.set(radius * 1.5, radius * 1.05, -radius * 1.5);
       camera.near = Math.max(radius / 10000, 0.001); camera.far = Math.max(radius * 100, 10000);
@@ -344,11 +399,12 @@ export default function Viewer3D({
       st.framed = frameKey;
       emitCameraPose();
     }
-  }, [items, geometry, geometryUrl, selectedKey, visibleLayerKey]);
+  }, [items, geometry, geometryUrl, selectedKey, visibleLayerKey, visibleSkuKey, skuGeometryReady]);
 
-  const label = status === "loading" ? "Loading Rhino geometry… (boxes shown temporarily)"
+  const label = shownItems.length === 0 ? "No preview geometry visible — turn on a SKU or part layer"
+    : status === "loading" ? "Loading Rhino geometry… (boxes shown temporarily)"
     : status === "error" ? "Geometry could not be loaded — bounding-box fallback"
-    : status === "mesh" ? (simulatedGeometry ? "Synthetic test geometry — not Rhino" : partial ? "Partial Rhino tessellation — some objects omitted" : "Rhino tessellated geometry · finish preview is approximate")
+    : status === "mesh" ? (simulatedGeometry ? "Synthetic test geometry — not Rhino" : partial ? "Stored Rhino tessellation is partial — see analysis warning" : "Rhino tessellated geometry · finish preview is approximate")
     : "Bounding-box fallback — not actual CAD geometry";
   return <div className="relative h-full w-full overflow-hidden"><div ref={hostRef} className="absolute inset-0 overflow-hidden" />
     <div className=" absolute right-4 top-4 z-10 flex flex-col items-end gap-1.5">
@@ -361,9 +417,9 @@ export default function Viewer3D({
           </button>
         ))}
         <button onClick={() => setLayerMenuOpen((open) => !open)}
-          className={`ml-1 rounded border px-2 py-1 ${visibleLayers !== null && visibleLayers.size !== layerNames.length ? "border-amber-500/50 text-amber-300" : "border-zinc-700 text-zinc-300"} hover:bg-zinc-800`}
+          className={`ml-1 rounded border px-2 py-1 ${(visibleLayers !== null && visibleLayers.size !== layerNames.length) || (visibleSkuLayers !== null && visibleSkuLayers.size !== skuNames.length) ? "border-amber-500/50 text-amber-300" : "border-zinc-700 text-zinc-300"} hover:bg-zinc-800`}
           title="Choose which model layers are visible in the preview">
-          Layers {visibleLayers === null ? layerNames.length : visibleLayers.size}/{layerNames.length}
+          SKU {visibleSkuLayers === null ? skuNames.length : visibleSkuLayers.size}/{skuNames.length} · Parts {visibleLayers === null ? layerNames.length : visibleLayers.size}/{layerNames.length}
         </button>
         {onSaveView && (
           <button onClick={() => setSavingView((v) => !v)}
@@ -375,13 +431,32 @@ export default function Viewer3D({
       {layerMenuOpen && (
         <div className="w-64 rounded-lg border border-zinc-800 bg-zinc-950/95 p-2 text-xs shadow-xl backdrop-blur">
           <div className="mb-2 flex items-center justify-between border-b border-zinc-800 pb-2">
-            <span className="font-medium text-zinc-200">Preview layers</span>
+            <span className="font-medium text-zinc-200">Preview visibility</span>
             <div className="flex gap-1">
-              <button onClick={() => setVisibleLayers(null)} className="rounded px-1.5 py-1 text-amber-300 hover:bg-zinc-800">All on</button>
-              <button onClick={() => setVisibleLayers(new Set())} className="rounded px-1.5 py-1 text-zinc-400 hover:bg-zinc-800">All off</button>
+              <button onClick={() => { setVisibleLayers(null); setVisibleSkuLayers(null); }} className="rounded px-1.5 py-1 text-amber-300 hover:bg-zinc-800">All on</button>
+              <button onClick={() => { setVisibleLayers(new Set()); setVisibleSkuLayers(new Set()); }} className="rounded px-1.5 py-1 text-zinc-400 hover:bg-zinc-800">All off</button>
             </div>
           </div>
-          <div className="max-h-56 space-y-0.5 overflow-y-auto">
+          {skuNames.length > 0 && <>
+            <div className="mb-1 mt-2 text-[10px] font-semibold uppercase tracking-wide text-amber-300">SKU Layers</div>
+            <div className="max-h-36 space-y-0.5 overflow-y-auto">
+              {skuNames.map((name) => {
+                const checked = visibleSkuLayers === null || visibleSkuLayers.has(name);
+                const color = items.find((item) => item.skuLayers.includes(name))?.color || "#71717a";
+                return <label key={name} className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-zinc-300 hover:bg-zinc-900">
+                  <input type="checkbox" checked={checked} onChange={() => setVisibleSkuLayers((current) => {
+                    const next = current === null ? new Set(skuNames) : new Set(current);
+                    if (next.has(name)) next.delete(name); else next.add(name);
+                    return next.size === skuNames.length ? null : next;
+                  })} className="accent-amber-500" />
+                  <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: color }} />
+                  <span className="truncate" title={name}>{name}</span>
+                </label>;
+              })}
+            </div>
+          </>}
+          <div className="mb-1 mt-2 text-[10px] font-semibold uppercase tracking-wide text-zinc-400">Part Layers</div>
+          <div className="max-h-36 space-y-0.5 overflow-y-auto">
             {layerNames.map((name) => {
               const checked = visibleLayers === null || visibleLayers.has(name);
               const color = items.find((item) => item.layer === name)?.color || "#71717a";

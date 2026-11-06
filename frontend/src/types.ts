@@ -30,6 +30,7 @@ export interface Part {
   block_paths?: string[][];
   occurrence_count?: number;
   matching_objects?: number;
+  sku_layers?: string[];
   renderable?: boolean;
 }
 
@@ -65,6 +66,7 @@ export interface SkuLayerInfo {
   object_count: number;
   blocks: string[];
   part_layers: string[];
+  geometry_partial?: boolean;
 }
 
 export interface Structure {
@@ -73,7 +75,9 @@ export interface Structure {
   analyzer?: string;
   target_schema?: string;
   geometry_url?: string;
+  geometry_api_url?: string;
   geometry_status?: "complete" | "partial";
+  preview_schema?: number;
   geometry_warnings?: string[];
   named_views?: string[];
   sku_layers?: SkuLayerInfo[];

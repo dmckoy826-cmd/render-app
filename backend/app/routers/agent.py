@@ -101,13 +101,18 @@ def _valid_geometry(data: bytes, struct: dict) -> None:
         if not isinstance(geometry, dict) or geometry.get("version") != 1 or geometry.get("units") != "inches":
             raise ValueError("invalid geometry header")
         known = {p["id"] for p in struct.get("parts", [])}
+        known_skus = {s.get("name") for s in struct.get("sku_layers", []) if s.get("name")}
         seen = set()
         for p in geometry.get("parts", []):
             key, positions = p["id"], p["positions"]
             triangles, lines = p["triangles"], p["lines"]
-            if key not in known or key in seen or len(positions) % 3 or len(triangles) % 3 or len(lines) % 2:
-                raise ValueError("invalid part identity or array lengths")
-            seen.add(key)
+            sku_layer = p.get("sku_layer", "")
+            identity = (key, sku_layer)
+            if (key not in known or identity in seen or len(positions) % 3 or
+                    len(triangles) % 3 or len(lines) % 2 or
+                    (sku_layer and sku_layer not in known_skus)):
+                raise ValueError("invalid part identity, SKU layer, or array lengths")
+            seen.add(identity)
             if any(isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x) for x in positions):
                 raise ValueError("non-finite vertex")
             if any(isinstance(x, bool) or not isinstance(x, int) or x < 0 or x >= len(positions) // 3
@@ -183,6 +188,7 @@ async def complete(job_id: int,
             geom_rel = f"geometry/{uuid.uuid4().hex}.json"
             (MEDIA_DIR / geom_rel).write_bytes(geom_data)
             struct["geometry_url"] = f"/media/{geom_rel}"
+            struct["geometry_api_url"] = f"/api/models/{model.id}/geometry"
         runner.apply_analysis(db, model, struct, preview_rel=analyze_preview)
     else:
         try:

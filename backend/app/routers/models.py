@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 import uuid
 
-from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile
 from sqlalchemy.orm import Session
 
 from .. import automatch, runner
@@ -151,6 +151,30 @@ def get_model(model_id: int, db: Session = Depends(get_db)):
     out["assignments"] = assignments
     out["jobs"] = jobs
     return out
+
+
+@router.get("/{model_id}/geometry")
+def get_model_geometry(model_id: int, request: Request, db: Session = Depends(get_db)):
+    """Serve only currently visible SKU/part geometry to the interactive preview."""
+    import json
+    m = db.get(ModelDoc, model_id)
+    if not m:
+        raise HTTPException(404, "model not found")
+    structure = m.structure or {}
+    path = geometry_file_from_url(structure.get("geometry_url", ""))
+    if path is None or not path.is_file():
+        raise HTTPException(404, "preview geometry not found")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise HTTPException(500, "preview geometry could not be read") from exc
+    sku_filter = set(request.query_params.getlist("sku_layer"))
+    layer_filter = set(request.query_params.getlist("layer"))
+    if sku_filter or layer_filter:
+        payload["parts"] = [part for part in payload.get("parts", [])
+                             if (not sku_filter or part.get("sku_layer") in sku_filter)
+                             and (not layer_filter or part.get("layer") in layer_filter)]
+    return payload
 
 
 @router.delete("/{model_id}")

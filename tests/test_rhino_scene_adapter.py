@@ -84,6 +84,7 @@ class Definition:
 class Instance:
     def __init__(self, oid, definition, transform):
         self.Id, self.InstanceDefinition, self.InstanceXform = oid, definition, transform
+        self.Attributes = types.SimpleNamespace(LayerIndex=1)
 
 
 class SceneAdapterTests(unittest.TestCase):
@@ -120,8 +121,11 @@ class SceneAdapterTests(unittest.TestCase):
         self.assertEqual(part["block"], "CHILD")
         self.assertEqual(part["block_paths"], [["PARENT", "CHILD"]])
         self.assertEqual(part["occurrence_count"], 2)
+        self.assertEqual(part["sku_layers"], ["ROOT"])
+        self.assertEqual(struct["sku_layers"][0]["name"], "ROOT")
         self.assertEqual(part["bbox"], {"min": [5, 1.5, 0], "max": [12, 2.5, 0]})
         preview = scene.geometry()["parts"][0]
+        self.assertEqual(preview["sku_layer"], "ROOT")
         self.assertEqual(preview["positions"][:3], [5, 1.5, 0])
         self.assertEqual(preview["positions"][9:12], [10, 1.5, 0])
         self.assertEqual(preview["triangles"], [0, 1, 2, 3, 4, 5])
