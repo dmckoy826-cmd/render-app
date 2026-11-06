@@ -460,17 +460,23 @@ export default function Viewer3D({
   const renderLayerNode = (node: LayerTreeNode, depth: number): any => {
     const key = node.path;
     const color = items.find((item) => item.layer === node.path || item.skuLayers.includes(node.path))?.color || "#71717a";
+    const inheritedOff = layerPrefixes(node.path).slice(0, -1).some((parent) => !!hiddenPreviewLayers[parent]);
+    const isInstanceLayer = skuLayerNames.includes(node.path);
+    const isDefinitionLayer = items.some((item) => item.layer === node.path);
+    const role = isInstanceLayer && isDefinitionLayer ? "Instance + geometry"
+      : isInstanceLayer ? "Block instance" : isDefinitionLayer ? "Geometry layer" : "Parent layer";
     return <div key={key}>
-      <label className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-zinc-300 hover:bg-zinc-900"
-        style={{ paddingLeft: `${depth * 13 + 6}px` }}>
-        <input type="checkbox" checked={!hiddenPreviewLayers[key]}
+      <label className={`flex items-center gap-2 rounded px-1.5 py-1 ${inheritedOff ? "cursor-not-allowed text-zinc-600" : "cursor-pointer text-zinc-300 hover:bg-zinc-900"}`}
+        style={{ paddingLeft: `${depth * 13 + 6}px` }} title={inheritedOff ? `${node.path} is controlled by a hidden parent` : node.path}>
+        <input type="checkbox" checked={!hiddenPreviewLayers[key]} disabled={inheritedOff}
           onChange={() => setHiddenPreviewLayers((current) => {
             const next = { ...current };
             if (next[key]) delete next[key]; else next[key] = true;
             return next;
           })} className="accent-amber-500" />
         <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: color }} />
-        <span className="truncate" title={node.path}>{node.label}</span>
+        <span className="min-w-0 flex-1 truncate">{node.label}</span>
+        <span className="shrink-0 text-[9px] text-zinc-600">{role}</span>
       </label>
       {node.children.map((child) => renderLayerNode(child, depth + 1))}
     </div>;
