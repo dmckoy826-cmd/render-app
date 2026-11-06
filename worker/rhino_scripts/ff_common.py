@@ -9,6 +9,7 @@ from __future__ import division
 import hashlib
 import json
 import math
+import zipfile
 
 SCHEMA = "rhino-geometry-v1"
 MAX_PREVIEW_VERTICES = 1500000
@@ -36,7 +37,7 @@ def union_bbox(a, b):
 
 class SceneBuilder(object):
     """Collect discovered parts and optional model-space preview geometry."""
-    def __init__(self, include_geometry=True):
+    def __init__(self, include_geometry=True, detailed_geometry_archive_path=None):
         self.include_geometry = include_geometry
         self.parts = {}
         self.order = []
@@ -50,6 +51,72 @@ class SceneBuilder(object):
         self.indices = 0
         self.partial = False
         self.warnings = []
+        self.preview_sku_count = 1
+        self.vertices_by_sku = {}
+        self.indices_by_sku = {}
+        self.detailed_geometry_archive_path = detailed_geometry_archive_path
+        self.detailed_geometry_archive = None
+        self.detailed_geometry_layers = {}
+        self.detailed_vertices_by_layer = {}
+        self.detailed_indices_by_layer = {}
+        if include_geometry and detailed_geometry_archive_path:
+            self.detailed_geometry_archive = zipfile.ZipFile(
+                detailed_geometry_archive_path, "w", zipfile.ZIP_DEFLATED)
+
+    def set_preview_sku_count(self, count):
+        self.preview_sku_count = max(1, int(count or 1))
+
+    def _add_detailed_geometry(self, key, layer, bbox, positions, triangles, lines,
+                               placement_layers, sku_layer):
+        """Write a full-budget sidecar for one placement layer while scanning.
+
+        These compressed per-layer sidecars let the preview load a single SKU
+        without dividing its mesh budget among unrelated SKUs. The regular
+        geometry payload below remains the bounded all-layers overview.
+        """
+        if self.detailed_geometry_archive is None or not placement_layers:
+            return
+        # A focused SKU is the outermost placement layer. Nested block-layer
+        # paths remain filters within that SKU, not separate product budgets.
+        detail_layer = str(placement_layers[0])
+        vertices = len(positions) // 3
+        indices = len(triangles) + len(lines)
+        used_vertices = self.detailed_vertices_by_layer.get(detail_layer, 0)
+        used_indices = self.detailed_indices_by_layer.get(detail_layer, 0)
+        group = self.detailed_geometry_layers.setdefault(detail_layer, {
+            "member_prefix": "layers/%s/" % hashlib.sha256(detail_layer.encode("utf-8")).hexdigest()[:24],
+            "member_count": 0,
+            "geometry_partial": False,
+        })
+        if (used_vertices + vertices > MAX_PREVIEW_VERTICES or
+                used_indices + indices > MAX_PREVIEW_INDICES):
+            group["geometry_partial"] = True
+            self.partial = True
+            self.warn("A single-layer detailed preview reached its full vertex/index limit; some meshes were omitted for that layer.")
+            return
+        member = "%s%08d.json" % (group["member_prefix"], group["member_count"])
+        part = {"id": key, "layer": layer, "sku_layer": sku_layer or detail_layer,
+                "instance_layers": list(placement_layers), "bbox": bbox,
+                "positions": positions, "triangles": triangles, "lines": lines}
+        payload = {"version": 1, "units": "inches", "parts": [part]}
+        self.detailed_geometry_archive.writestr(
+            member, json.dumps(payload, separators=(",", ":"), allow_nan=False))
+        group["member_count"] += 1
+        self.detailed_vertices_by_layer[detail_layer] = used_vertices + vertices
+        self.detailed_indices_by_layer[detail_layer] = used_indices + indices
+
+    def close_detailed_geometry(self):
+        if self.detailed_geometry_archive is None:
+            return
+        manifest = []
+        for layer, metadata in sorted(self.detailed_geometry_layers.items()):
+            entry = {"layer": layer}
+            entry.update(metadata)
+            manifest.append(entry)
+        self.detailed_geometry_archive.writestr(
+            "manifest.json", json.dumps(manifest, separators=(",", ":")))
+        self.detailed_geometry_archive.close()
+        self.detailed_geometry_archive = None
 
     def warn(self, message):
         if message not in self.warnings:
@@ -69,6 +136,7 @@ class SceneBuilder(object):
             "object_count": 0,
             "blocks": set(),
             "part_layers": set(),
+            "geometry_partial": False,
         })
         if block_name is not None:
             sku["object_count"] += 1
@@ -85,14 +153,14 @@ class SceneBuilder(object):
 
     def add_leaf(self, key, name, layer, color, owner, ancestors, bbox,
                  renderable, source_id, scaled=False, positions=None,
-                 triangles=None, lines=None):
+                 triangles=None, lines=None, sku_layer=None, instance_layers=None):
         part = self.parts.get(key)
         if part is None:
             part = {"id": key, "name": name, "layer": layer, "block": owner,
                     "requires_block_edit": bool(owner), "bbox": None,
                     "block_ancestors": set(), "block_paths": set(), "occurrence_count": 0,
                     "renderable": bool(renderable), "source_ids": set(),
-                    "positions": [], "triangles": [], "lines": []}
+                    "sku_layers": set(), "preview_groups": {}}
             self.parts[key] = part
             self.order.append(key)
         elif part["renderable"] != bool(renderable):
@@ -102,6 +170,10 @@ class SceneBuilder(object):
         part["block_paths"].add(tuple(ancestors))
         part["occurrence_count"] += 1
         part["source_ids"].add(str(source_id))
+        placement_layers = [str(value) for value in (instance_layers or []) if value]
+        if not placement_layers and sku_layer:
+            placement_layers = [str(sku_layer)]
+        part["sku_layers"].update(placement_layers)
         self.extents = union_bbox(self.extents, bbox)
         self.layers.setdefault(layer, {"name": layer, "color": color, "part_ids": set()})["part_ids"].add(key)
         for block_name in ancestors:
@@ -110,6 +182,8 @@ class SceneBuilder(object):
             self.blocks[block_name]["layers"].add(layer)
             self.blocks[block_name]["part_ids"].add(key)
         self.occurrences.append({"key": key, "layer": layer, "owner": owner,
+                                 "sku_layer": placement_layers[0] if placement_layers else "",
+                                 "instance_layers": list(placement_layers),
                                  "ancestors": list(ancestors), "renderable": bool(renderable),
                                  "scaled": bool(scaled), "bbox": bbox})
         if not self.include_geometry:
@@ -119,17 +193,38 @@ class SceneBuilder(object):
             self.partial = True
             self.warn("Some geometry could not be meshed for the interactive preview.")
             return
-        if (self.vertices + len(positions) // 3 > MAX_PREVIEW_VERTICES or
-                self.indices + len(triangles) + len(lines) > MAX_PREVIEW_INDICES):
+        sku_key = placement_layers[-1] if placement_layers else ""
+        group_key = tuple(placement_layers)
+        vertex_count = len(positions) // 3
+        index_count = len(triangles) + len(lines)
+        self._add_detailed_geometry(key, layer, bbox, positions, triangles, lines,
+                                    placement_layers, sku_layer)
+        sku_vertex_limit = max(1, MAX_PREVIEW_VERTICES // self.preview_sku_count)
+        sku_index_limit = max(1, MAX_PREVIEW_INDICES // self.preview_sku_count)
+        sku_vertices = self.vertices_by_sku.get(sku_key, 0)
+        sku_indices = self.indices_by_sku.get(sku_key, 0)
+        if (self.vertices + vertex_count > MAX_PREVIEW_VERTICES or
+                self.indices + index_count > MAX_PREVIEW_INDICES or
+                sku_vertices + vertex_count > sku_vertex_limit or
+                sku_indices + index_count > sku_index_limit):
             self.partial = True
-            self.warn("The interactive preview hit its geometry limit; some objects are omitted.")
+            self.warn("The interactive preview geometry budget was reached; some objects were omitted. Each SKU layer has a fair share of the preview budget.")
+            if sku_key in self.sku_layers:
+                self.sku_layers[sku_key]["geometry_partial"] = True
             return
-        base = len(part["positions"]) // 3
-        part["positions"].extend(positions)
-        part["triangles"].extend([base + i for i in triangles])
-        part["lines"].extend([base + i for i in lines])
-        self.vertices += len(positions) // 3
-        self.indices += len(triangles) + len(lines)
+        group = part["preview_groups"].setdefault(group_key, {
+            "positions": [], "triangles": [], "lines": [], "bbox": None,
+            "instance_layers": list(placement_layers),
+        })
+        base = len(group["positions"]) // 3
+        group["positions"].extend(positions)
+        group["triangles"].extend([base + i for i in triangles])
+        group["lines"].extend([base + i for i in lines])
+        group["bbox"] = union_bbox(group["bbox"], bbox)
+        self.vertices += vertex_count
+        self.indices += index_count
+        self.vertices_by_sku[sku_key] = sku_vertices + vertex_count
+        self.indices_by_sku[sku_key] = sku_indices + index_count
 
     def structure(self, source_file):
         if not self.order:
@@ -143,6 +238,7 @@ class SceneBuilder(object):
                           "block_paths": [list(path) for path in sorted(p["block_paths"])],
                           "occurrence_count": p["occurrence_count"],
                           "matching_objects": len(p["source_ids"]),
+                          "sku_layers": sorted(p["sku_layers"]),
                           "renderable": p["renderable"]})
         layers = [{"name": d["name"], "color": d["color"], "part_count": len(d["part_ids"])}
                   for _, d in sorted(self.layers.items())]
@@ -150,22 +246,42 @@ class SceneBuilder(object):
                    "layers": sorted(d["layers"]), "part_ids": sorted(d["part_ids"])}
                   for _, d in sorted(self.blocks.items())]
         sku_layers = [{"name": d["name"], "color": d["color"], "object_count": d["object_count"],
-                       "blocks": sorted(d["blocks"]), "part_layers": sorted(d["part_layers"])}
+                       "blocks": sorted(d["blocks"]), "part_layers": sorted(d["part_layers"]),
+                       "geometry_partial": d["geometry_partial"]}
                       for _, d in sorted(self.sku_layers.items()) if d["part_layers"] or d["blocks"]]
         out = {"units": "inches", "source_file": source_file,
                "analyzer": "rhino8-worker 2.0", "target_schema": SCHEMA,
+               "preview_schema": 5,
+               "layer_visibility_schema": "rhino-instance-definition-v3",
                "extents": self.extents, "layers": layers, "blocks": blocks, "parts": parts,
                "geometry_status": "partial" if self.partial else "complete",
                "geometry_warnings": list(self.warnings)}
         if sku_layers:
             out["sku_layers"] = sku_layers
+        if self.detailed_geometry_layers:
+            out["preview_layer_geometry"] = [
+                {"layer": layer, "member_prefix": data["member_prefix"],
+                 "member_count": data["member_count"],
+                 "geometry_partial": data["geometry_partial"]}
+                for layer, data in sorted(self.detailed_geometry_layers.items())
+            ]
         return out
 
     def geometry(self):
-        return {"version": 1, "units": "inches", "parts": [
-            {"id": key, "positions": self.parts[key]["positions"],
-             "triangles": self.parts[key]["triangles"], "lines": self.parts[key]["lines"]}
-            for key in self.order if self.parts[key]["positions"]]}
+        parts = []
+        for key in self.order:
+            for _, group in sorted(self.parts[key]["preview_groups"].items()):
+                if not group["positions"]:
+                    continue
+                entry = {"id": key, "layer": self.parts[key]["layer"],
+                         "positions": group["positions"],
+                         "triangles": group["triangles"], "lines": group["lines"],
+                         "bbox": group["bbox"],
+                         "instance_layers": group["instance_layers"]}
+                if group["instance_layers"]:
+                    entry["sku_layer"] = group["instance_layers"][0]
+                parts.append(entry)
+        return {"version": 1, "units": "inches", "parts": parts}
 
 
 def _assignment_value(a):
@@ -174,14 +290,17 @@ def _assignment_value(a):
         raise ValueError("A finish assignment no longer has a valid finish.")
     try:
         scale = float(a.get("scale_multiplier", 1))
+        rotation = float(a.get("rotation_deg", 0.0) or 0.0)
+        offset_u = float(a.get("offset_u_in", 0.0) or 0.0)
+        offset_v = float(a.get("offset_v_in", 0.0) or 0.0)
         width = float(finish.get("swatch_width_in", 0))
         height = float(finish.get("swatch_height_in", 0))
     except (ValueError, TypeError):
-        raise ValueError("Finish dimensions and scale must be numbers.")
+        raise ValueError("Finish dimensions, scale, rotation, and offset must be numbers.")
     if not all(math.isfinite(v) if hasattr(math, "isfinite") else not (math.isnan(v) or math.isinf(v))
-               for v in (scale, width, height)) or min(scale, width, height) <= 0:
+               for v in (scale, rotation, offset_u, offset_v, width, height)) or min(scale, width, height) <= 0:
         raise ValueError("Finish dimensions and scale must be finite and greater than zero.")
-    return (str(finish["id"]), scale)
+    return (str(finish["id"]), scale, round(rotation, 4), round(offset_u, 4), round(offset_v, 4))
 
 
 def plan_assignments(scene, assignments):

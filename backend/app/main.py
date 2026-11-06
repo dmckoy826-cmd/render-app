@@ -14,7 +14,14 @@ from .routers import agent, finishes, jobs, models, presets, renders
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    from sqlalchemy import text
     Base.metadata.create_all(bind=engine)
+    with engine.begin() as conn:
+        for col, default in (("rotation_deg", "0.0"), ("offset_u_in", "0.0"), ("offset_v_in", "0.0")):
+            try:
+                conn.execute(text(f"ALTER TABLE assignments ADD COLUMN {col} FLOAT DEFAULT {default}"))
+            except Exception:
+                pass
     yield
 
 

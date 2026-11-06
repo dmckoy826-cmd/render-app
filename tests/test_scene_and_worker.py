@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+import zipfile
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,9 +22,10 @@ def assignment(kind, target, finish_id=1, scale=1):
             "finish": {"id": finish_id, "swatch_width_in": 12, "swatch_height_in": 12}}
 
 
-def add_part(scene, key, owner, path, layer="INNER", source="geometry-1", renderable=True, scaled=False):
+def add_part(scene, key, owner, path, layer="INNER", source="geometry-1", renderable=True, scaled=False, sku_layer=None):
     scene.add_leaf(key, "panel", layer, "#123456", owner, path, BOX, renderable, source,
-                   scaled=scaled, positions=[0, 0, 0, 2, 0, 0, 0, 2, 0], triangles=[0, 1, 2])
+                   scaled=scaled, positions=[0, 0, 0, 2, 0, 0, 0, 2, 0], triangles=[0, 1, 2],
+                   sku_layer=sku_layer)
 
 
 def shared_scene(renderable=True, scaled=False):
@@ -53,6 +55,46 @@ class TargetingTests(unittest.TestCase):
         self.assertEqual({b["name"]: b["instance_count"] for b in structure["blocks"]},
                          {"A": 1, "B": 1, "SHARED": 2})
         self.assertEqual(scene.geometry()["parts"][0]["triangles"], [0, 1, 2, 3, 4, 5])
+
+    def test_preview_geometry_is_partitioned_by_sku_layer(self):
+        scene = common.SceneBuilder()
+        scene.add_block("SHARED")
+        scene.add_sku_layer("SKU-A", block_name="SHARED", part_layer="INNER")
+        scene.add_sku_layer("SKU-B", block_name="SHARED", part_layer="INNER")
+        add_part(scene, "same-part", "SHARED", ["SHARED"], source="a", sku_layer="SKU-A")
+        add_part(scene, "same-part", "SHARED", ["SHARED"], source="b", sku_layer="SKU-B")
+
+        structure = scene.structure("file.3dm")
+        self.assertEqual(structure["preview_schema"], 5)
+        self.assertEqual(structure["layer_visibility_schema"], "rhino-instance-definition-v3")
+        self.assertEqual(structure["parts"][0]["sku_layers"], ["SKU-A", "SKU-B"])
+        previews = scene.geometry()["parts"]
+        self.assertEqual({p["sku_layer"] for p in previews}, {"SKU-A", "SKU-B"})
+        self.assertEqual(len(previews), 2)
+
+    def test_full_budget_preview_meshes_are_isolated_per_sku(self):
+        with tempfile.TemporaryDirectory() as td:
+            archive_path = Path(td) / "layers.zip"
+            with mock.patch.object(common, "MAX_PREVIEW_VERTICES", 3), \
+                    mock.patch.object(common, "MAX_PREVIEW_INDICES", 3):
+                scene = common.SceneBuilder(detailed_geometry_archive_path=str(archive_path))
+                scene.add_block("BLOCK")
+                scene.set_preview_sku_count(2)
+                scene.add_sku_layer("SKU-A", block_name="BLOCK", part_layer="INNER")
+                scene.add_sku_layer("SKU-B", block_name="BLOCK", part_layer="INNER")
+                add_part(scene, "same-part", "BLOCK", ["BLOCK"], source="a", sku_layer="SKU-A")
+                add_part(scene, "same-part", "BLOCK", ["BLOCK"], source="b", sku_layer="SKU-B")
+                scene.close_detailed_geometry()
+                structure = scene.structure("file.3dm")
+            details = {entry["layer"]: entry for entry in structure["preview_layer_geometry"]}
+            self.assertEqual(set(details), {"SKU-A", "SKU-B"})
+            self.assertTrue(all(entry["member_count"] == 1 and not entry["geometry_partial"]
+                                for entry in details.values()))
+            self.assertTrue(structure["geometry_status"] == "partial")
+            with zipfile.ZipFile(str(archive_path)) as archive:
+                for entry in details.values():
+                    mesh_data = json.loads(archive.read(entry["member_prefix"] + "00000000.json"))
+                    self.assertEqual(len(mesh_data["parts"]), 1)
 
     def test_different_block_overrides_rejected_for_shared_definition(self):
         scene = shared_scene()
@@ -85,6 +127,18 @@ class TargetingTests(unittest.TestCase):
             common.plan_assignments(shared_scene(renderable=False), [assignment("layer", "INNER")])
         with self.assertRaisesRegex(ValueError, "scaled block"):
             common.plan_assignments(shared_scene(scaled=True), [assignment("layer", "INNER")])
+
+    def test_preview_budget_is_shared_fairly_across_sku_layers(self):
+        with mock.patch.object(common, "MAX_PREVIEW_VERTICES", 6):
+            with mock.patch.object(common, "MAX_PREVIEW_INDICES", 6):
+                scene = common.SceneBuilder()
+                scene.set_preview_sku_count(2)
+                scene.add_sku_layer("SKU-A", part_layer="INNER")
+                scene.add_sku_layer("SKU-B", part_layer="INNER")
+                add_part(scene, "p1", None, [], source="a", sku_layer="SKU-A")
+                add_part(scene, "p2", None, [], source="b", sku_layer="SKU-B")
+        self.assertEqual({part["sku_layer"] for part in scene.geometry()["parts"]}, {"SKU-A", "SKU-B"})
+        self.assertEqual(scene.structure("a.3dm")["geometry_status"], "complete")
 
     def test_preview_budget_is_labeled_partial(self):
         with mock.patch.object(common, "MAX_PREVIEW_VERTICES", 2):

@@ -9,6 +9,9 @@ class AssignmentIn(BaseModel):
     target_name: str
     finish_id: Optional[int] = None  # None removes the assignment
     scale_multiplier: float = Field(default=1.0, gt=0, allow_inf_nan=False)
+    rotation_deg: float = Field(default=0.0, ge=0.0, le=90.0, allow_inf_nan=False)
+    offset_u_in: float = Field(default=0.0, allow_inf_nan=False)
+    offset_v_in: float = Field(default=0.0, allow_inf_nan=False)
 
 
 class AutoMatchApplyIn(BaseModel):
@@ -23,6 +26,9 @@ class PresetRuleIn(BaseModel):
     target_kind: str = Field(default="layer", pattern="^(layer|block|part)$")
     target_property: str = Field(default="name", pattern="^(name|identity)$")
     scale_multiplier: float = Field(default=1.0, gt=0, allow_inf_nan=False)
+    rotation_deg: float = Field(default=0.0, ge=0.0, le=90.0, allow_inf_nan=False)
+    offset_u_in: float = Field(default=0.0, allow_inf_nan=False)
+    offset_v_in: float = Field(default=0.0, allow_inf_nan=False)
 
     @model_validator(mode="after")
     def identity_is_exact_part(self):
@@ -56,6 +62,9 @@ class RenderSettings(BaseModel):
     named_view: Optional[str] = None
     keep_file_view: bool = False
     use_file_vray_settings: bool = False
+    vray_device: Optional[str] = None
+    vray_speed: Optional[str] = None
+    isolate_sku_layer: Optional[str] = None
     batch: Optional[dict] = None
 
 

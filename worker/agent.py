@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import ExitStack
 import subprocess
 import struct
 import sys
@@ -46,14 +47,47 @@ def download(url: str, dest: Path) -> None:
             fh.write(chunk)
 
 
-def run_rhino(script: Path, env: dict, timeout: float = 3600) -> str:
+class JobCanceledError(RuntimeError):
+    """Raised when a running job is canceled by the user from the UI."""
+
+
+def _kill_process_tree(proc: subprocess.Popen) -> None:
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                capture_output=True,
+                timeout=10,
+            )
+        except Exception:
+            pass
+    try:
+        proc.kill()
+    except Exception:
+        pass
+    try:
+        proc.wait(timeout=5)
+    except Exception:
+        pass
+
+
+def is_job_canceled(job_id: int | None) -> bool:
+    if not job_id:
+        return False
+    try:
+        r = requests.get(f"{API}/api/jobs/{job_id}", timeout=5)
+        if r.status_code == 200 and r.json().get("status") == "canceled":
+            return True
+    except requests.RequestException:
+        pass
+    return False
+
+
+def run_rhino(script: Path, env: dict, timeout: float = 3600, job_id: int | None = None) -> str:
     """Launch Rhino and execute a RhinoPython script; return its console output.
 
-    Command line follows the McNeel-documented pattern for paths with spaces:
-    the script path is wrapped in PARENTHESES inside the runscript macro, and
-    `_Exit` closes Rhino when the script finishes (each script clears the
-    document's Modified flag so no save prompt can block the exit).
-    `/notemplate` skips the startup template/units dialog.
+    Monitors the server job status every 2 seconds while Rhino is running; if the
+    user cancels the job in the UI, immediately kills the Rhino process tree.
     """
     e = {**os.environ, **env}
     if os.name == "nt":
@@ -66,12 +100,27 @@ def run_rhino(script: Path, env: dict, timeout: float = 3600) -> str:
         cmd = [RHINO, "/nosplash", "/notemplate",
                f"/runscript=-_RunPythonScript ({script}) _Exit"]
         log("exec:", " ".join(cmd))
-    try:
-        proc = subprocess.run(cmd, env=e, capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(f"Rhino timed out after {timeout:.0f}s (job may be too large "
-                           f"or Rhino showed a modal dialog)") from exc
-    out = f"{proc.stdout or ''}\n{proc.stderr or ''}".strip()
+    proc = subprocess.Popen(cmd, env=e, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    started = time.monotonic()
+    stdout_str, stderr_str = "", ""
+    while True:
+        try:
+            stdout_str, stderr_str = proc.communicate(timeout=2.0)
+            break
+        except subprocess.TimeoutExpired as exc:
+            if is_job_canceled(job_id):
+                log(f"job #{job_id} canceled by user — killing Rhino PID {proc.pid}")
+                _kill_process_tree(proc)
+                raise JobCanceledError(f"Job #{job_id} was canceled by user.") from exc
+            if time.monotonic() - started > timeout:
+                _kill_process_tree(proc)
+                raise RuntimeError(
+                    f"Rhino timed out after {timeout:.0f}s (job may be too large "
+                    f"or Rhino showed a modal dialog)"
+                ) from exc
+    if is_job_canceled(job_id):
+        raise JobCanceledError(f"Job #{job_id} was canceled by user.")
+    out = f"{stdout_str or ''}\n{stderr_str or ''}".strip()
     if proc.returncode != 0:
         raise RuntimeError(f"Rhino exited {proc.returncode}: {out[-2000:]}")
     return out
@@ -140,11 +189,13 @@ def do_analyze(job: dict, model: dict) -> None:
         out_json = td / "structure.json"
         out_png = td / "preview.png"
         out_geometry = td / "geometry.json"
+        out_geometry_layers = td / "geometry_layers.zip"
         progress(job["id"], 10, "Worker: importing model")
         console = run_rhino(HERE / "rhino_scripts" / "analyze_model.py", {
             "FF_MODEL": str(model_path), "FF_OUT_JSON": str(out_json),
             "FF_OUT_PNG": str(out_png), "FF_OUT_GEOMETRY": str(out_geometry),
-        })
+            "FF_OUT_GEOMETRY_LAYERS": str(out_geometry_layers),
+        }, job_id=job["id"])
         error = Path(str(out_json) + ".error.txt")
         if error.exists() or not out_json.exists():
             raise script_error(error, f"Rhino produced no structure.json. Console: {console[-1500:]}")
@@ -152,16 +203,17 @@ def do_analyze(job: dict, model: dict) -> None:
         if structure.get("target_schema") != "rhino-geometry-v1" or not out_geometry.is_file():
             raise RuntimeError("Rhino analysis did not produce the expected structure and geometry preview.")
         progress(job["id"], 90, "Uploading structure and geometry")
-        with open(out_geometry, "rb") as geometry:
+        with ExitStack() as stack:
+            geometry = stack.enter_context(open(out_geometry, "rb"))
             files = [("geometry", ("geometry.json", geometry, "application/json"))]
+            if out_geometry_layers.is_file():
+                layer_geometry = stack.enter_context(open(out_geometry_layers, "rb"))
+                files.append(("geometry_layers", ("geometry_layers.zip", layer_geometry, "application/zip")))
             if out_png.exists():
-                with open(out_png, "rb") as preview:
-                    files.append(("files", ("preview.png", preview, "image/png")))
-                    r = requests.post(f"{API}/api/agent/jobs/{job['id']}/complete",
-                                      data={"structure": json.dumps(structure)}, files=files, timeout=300)
-            else:
-                r = requests.post(f"{API}/api/agent/jobs/{job['id']}/complete",
-                                  data={"structure": json.dumps(structure)}, files=files, timeout=300)
+                preview = stack.enter_context(open(out_png, "rb"))
+                files.append(("files", ("preview.png", preview, "image/png")))
+            r = requests.post(f"{API}/api/agent/jobs/{job['id']}/complete",
+                              data={"structure": json.dumps(structure)}, files=files, timeout=600)
         r.raise_for_status()
 
 
@@ -200,10 +252,13 @@ def do_render(job: dict, model: dict, settings: dict, assignments: list) -> None
             "FF_NAMED_VIEW": str(settings.get("named_view") or ""),
             "FF_KEEP_FILE_VIEW": "1" if settings.get("keep_file_view") else "",
             "FF_USE_FILE_VRAY": "1" if settings.get("use_file_vray_settings") else "",
+            "FF_VRAY_DEVICE": str(settings.get("vray_device") or ""),
+            "FF_VRAY_SPEED": str(settings.get("vray_speed") or ""),
+            "FF_ISOLATE_SKU": str(settings.get("isolate_sku_layer") or ""),
             "FF_BATCH": str(batch_path) if isinstance(batch_data, dict) else "",
             "FF_JOB_ID": str(job["id"]),
             "FF_API": API,
-        }, timeout=14400 if isinstance(batch_data, dict) else 3600)
+        }, timeout=14400 if isinstance(batch_data, dict) else 3600, job_id=job["id"])
         if error.exists():
             raise script_error(error, "Rhino render failed.")
         flexible = bool(settings.get("use_file_vray_settings") or isinstance(batch_data, dict))
@@ -257,6 +312,8 @@ def main() -> int:
                 do_render(job, payload["model"], payload.get("settings", {}),
                           payload.get("assignments", []))
             log(f"job #{job['id']} complete")
+        except JobCanceledError:
+            log(f"job #{job['id']} stopped (canceled by user)")
         except Exception as exc:  # noqa: BLE001
             log(f"job #{job['id']} failed: {exc}")
             try:

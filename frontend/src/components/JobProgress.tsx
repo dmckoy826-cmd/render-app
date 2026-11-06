@@ -1,3 +1,5 @@
+import { useState } from "react";
+import { api, toast } from "../api";
 import type { Job } from "../types";
 
 export type ChipStatus = Job["status"] | "uploaded" | "analyzing" | "ready";
@@ -13,23 +15,72 @@ export function StatusChip({ status }: { status: ChipStatus }) {
     failed: "bg-red-500/15 text-red-300 border-red-500/30",
     canceled: "bg-zinc-500/15 text-zinc-400 border-zinc-600/30",
   };
-  return <span className={`rounded border px-2 py-0.5 text-[11px] capitalize ${map[status]}`}>{status}</span>;
+  return (
+    <span className={`rounded border px-2 py-0.5 text-[11px] capitalize ${map[status]}`}>
+      {status}
+    </span>
+  );
 }
 
-export default function JobProgress({ job }: { job: Job }) {
-  const bar = job.status === "failed" ? "bg-red-500" : job.status === "canceled" ? "bg-zinc-500"
-    : job.status === "done" ? "bg-emerald-500" : "bg-amber-500";
+export default function JobProgress({
+  job,
+  onCanceled,
+}: {
+  job: Job;
+  onCanceled?: () => void;
+}) {
+  const [killing, setKilling] = useState(false);
+  const canKill = job.status === "queued" || job.status === "running";
+  const bar =
+    job.status === "failed"
+      ? "bg-red-500"
+      : job.status === "canceled"
+      ? "bg-zinc-500"
+      : job.status === "done"
+      ? "bg-emerald-500"
+      : "bg-amber-500";
+
+  const handleKill = async () => {
+    setKilling(true);
+    try {
+      await api.post(`/api/jobs/${job.id}/cancel`);
+      toast(`Stopped job #${job.id} — killing Rhino render process`);
+      onCanceled?.();
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "Could not stop job", "err");
+      setKilling(false);
+    }
+  };
+
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-4">
       <div className="mb-2 flex items-center justify-between gap-3 text-xs">
         <span className="truncate text-zinc-300">
-          <span className="mr-2 rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-zinc-400">{job.kind}</span>
+          <span className="mr-2 rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-zinc-400">
+            {job.kind}
+          </span>
           {job.stage || "…"}
         </span>
-        <StatusChip status={job.status} />
+        <div className="flex items-center gap-2 shrink-0">
+          <StatusChip status={job.status} />
+          {canKill && (
+            <button
+              type="button"
+              disabled={killing}
+              onClick={handleKill}
+              className="rounded-lg border border-red-500/50 bg-red-500/15 px-2.5 py-1 text-[11px] font-medium text-red-300 hover:bg-red-500/25 disabled:opacity-50"
+              title="Immediately stop this job and kill the running Rhino render process"
+            >
+              {killing ? "Stopping…" : "✕ Kill Render"}
+            </button>
+          )}
+        </div>
       </div>
       <div className="h-2 overflow-hidden rounded bg-zinc-800">
-        <div className={`h-full transition-all duration-500 ${bar}`} style={{ width: `${job.progress}%` }} />
+        <div
+          className={`h-full transition-all duration-500 ${bar}`}
+          style={{ width: `${job.progress}%` }}
+        />
       </div>
       <div className="mt-1.5 flex justify-between text-[11px] text-zinc-500">
         <span>{job.runner === "mock" ? "simulated engine" : "rhino agent"}</span>

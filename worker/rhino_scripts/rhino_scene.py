@@ -24,6 +24,15 @@ def layer_of(obj):
     return layer.FullPath or layer.Name or "0", "#%02x%02x%02x" % (color.R, color.G, color.B)
 
 
+def sku_layer_of(obj):
+    """Return the exact block-instance placement layer, not its definition layer.
+
+    The layer hierarchy is evaluated separately by the preview: a hidden parent
+    masks descendants, while definition geometry keeps its own independent layer.
+    """
+    return layer_of(obj)[0]
+
+
 def geometry_kind(geometry):
     g = Rhino.Geometry
     if isinstance(geometry, g.Mesh):
@@ -130,7 +139,18 @@ def preview_geometry(geometry, kind, factor):
     else:
         brep = geometry if kind == "brep" else geometry.ToBrep()
         if brep is not None:
-            meshes = Rhino.Geometry.Mesh.CreateFromBrep(brep, Rhino.Geometry.MeshingParameters.Default) or []
+            # This is an interactive preview, not the production render mesh.
+            # Rhino's default mesher can exhaust the per-SKU preview budget on
+            # detailed CAD; FastRenderMesh keeps the silhouette usable while
+            # reserving the final material/render geometry for the render worker.
+            parameters_type = getattr(Rhino.Geometry, "MeshingParameters", None)
+            parameters = getattr(parameters_type, "FastRenderMesh", None) if parameters_type else None
+            if parameters is None and parameters_type is not None:
+                parameters = getattr(parameters_type, "Default", None)
+            if parameters is None:
+                meshes = Rhino.Geometry.Mesh.CreateFromBrep(brep) or []
+            else:
+                meshes = Rhino.Geometry.Mesh.CreateFromBrep(brep, parameters) or []
     for mesh in meshes:
         start = len(positions) // 3
         for vertex in mesh.Vertices:
@@ -142,15 +162,16 @@ def preview_geometry(geometry, kind, factor):
     return positions, triangles, lines
 
 
-def scan_document(include_geometry=True):
-    builder = SceneBuilder(include_geometry)
+def scan_document(include_geometry=True, detailed_geometry_archive_path=None):
+    builder = SceneBuilder(include_geometry, detailed_geometry_archive_path)
     if str(sc.doc.ModelUnitSystem).lower() in ("none", "unset", "customunits"):
         raise ValueError("The drawing has no supported model units. Set units in Rhino first.")
     factor = Rhino.RhinoMath.UnitScale(sc.doc.ModelUnitSystem, Rhino.UnitSystem.Inches)
     if not factor or factor <= 0:
         raise ValueError("The drawing has no valid model units. Set its units in Rhino first.")
 
-    def visit(obj, transform, ancestors, stack, sku_layer=None, sku_color="#8d929a"):
+    def visit(obj, transform, ancestors, stack, instance_layers=None, sku_color="#8d929a"):
+        instance_layers = list(instance_layers or [])
         if (len(builder.occurrences) + len(builder.unsupported) >= MAX_OCCURRENCES or
                 len(builder.parts) >= MAX_PARTS):
             raise ValueError("Model has too many geometry objects for safe analysis.")
@@ -161,16 +182,18 @@ def scan_document(include_geometry=True):
             name = definition.Name
             if len(stack) >= MAX_DEPTH or name in stack:
                 raise ValueError("Block nesting is cyclic or too deep: %s" % name)
-            if not ancestors and hasattr(obj, "Attributes") and obj.Attributes is not None:
+            if hasattr(obj, "Attributes") and obj.Attributes is not None:
                 try:
-                    sku_layer, sku_color = layer_of(obj)
-                    builder.add_sku_layer(sku_layer, sku_color, block_name=name)
+                    placement_layer, placement_color = layer_of(obj)
+                    instance_layers.append(placement_layer)
+                    sku_color = placement_color
+                    builder.add_sku_layer(placement_layer, placement_color, block_name=name)
                 except Exception:
                     pass
             builder.add_block(name)
             child_transform = transform * obj.InstanceXform
             for child in definition.GetObjects() or []:
-                visit(child, child_transform, ancestors + [name], stack + [name], sku_layer, sku_color)
+                visit(child, child_transform, ancestors + [name], stack + [name], instance_layers, sku_color)
             return
         owner = ancestors[-1] if ancestors else None
         info = identity(obj, owner)
@@ -183,10 +206,14 @@ def scan_document(include_geometry=True):
             builder.add_unsupported(layer, ancestors, kind)
             return
         if not ancestors and hasattr(obj, "Attributes") and obj.Attributes is not None:
-            sku_layer, sku_color = info["layer"], info["color"]
-            builder.add_sku_layer(sku_layer, sku_color, block_name="")
-        if sku_layer:
-            builder.add_sku_layer(sku_layer, sku_color, part_layer=info["layer"])
+            # Top-level ordinary geometry is controlled by its object layer; a
+            # block occurrence instead carries every placement layer encountered.
+            if not instance_layers:
+                instance_layers.append(sku_layer_of(obj))
+                sku_color = info["color"]
+                builder.add_sku_layer(instance_layers[-1], sku_color, block_name="")
+        for placement_layer in instance_layers:
+            builder.add_sku_layer(placement_layer, sku_color, part_layer=info["layer"])
         geometry = obj.Geometry.Duplicate()
         if geometry is None or not geometry.Transform(transform):
             raise ValueError("Could not transform geometry in '%s'." % info["name"])
@@ -200,7 +227,9 @@ def scan_document(include_geometry=True):
         builder.add_leaf(info["key"], info["name"], info["layer"], info["color"], owner,
                          ancestors, bbox, info["renderable"], obj.Id,
                          scaled=has_scaling(transform), positions=positions,
-                         triangles=triangles, lines=lines)
+                         triangles=triangles, lines=lines,
+                         sku_layer=instance_layers[0] if instance_layers else None,
+                         instance_layers=instance_layers)
 
     top_objects = []
     if hasattr(Rhino.DocObjects, "ObjectEnumeratorSettings") and hasattr(sc.doc.Objects, "GetObjectList"):
@@ -220,7 +249,18 @@ def scan_document(include_geometry=True):
             obj = sc.doc.Objects.FindId(oid)
             if obj is not None:
                 top_objects.append(obj)
+    # Divide the preview geometry budget across top-level SKU layers so an early
+    # dense SKU cannot consume the entire interactive preview payload.
+    top_layer_names = set()
+    for obj in top_objects:
+        if obj is not None:
+            try:
+                top_layer_names.add(sku_layer_of(obj))
+            except Exception:
+                pass
+    builder.set_preview_sku_count(len(top_layer_names))
     for obj in top_objects:
         if obj is not None:
             visit(obj, Rhino.Geometry.Transform.Identity, [], [])
+    builder.close_detailed_geometry()
     return builder

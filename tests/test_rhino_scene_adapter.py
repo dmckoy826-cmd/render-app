@@ -82,19 +82,20 @@ class Definition:
 
 
 class Instance:
-    def __init__(self, oid, definition, transform):
+    def __init__(self, oid, definition, transform, layer=1):
         self.Id, self.InstanceDefinition, self.InstanceXform = oid, definition, transform
+        self.Attributes = types.SimpleNamespace(LayerIndex=layer)
 
 
 class SceneAdapterTests(unittest.TestCase):
-    def load_adapter(self, objects):
+    def load_adapter(self, objects, layers=None):
         geometry = types.SimpleNamespace(Mesh=Mesh, Brep=Brep, Extrusion=Extrusion,
             Surface=Surface, SubD=SubD, Curve=Curve, Transform=Transform)
         rhino = types.SimpleNamespace(Geometry=geometry,
             DocObjects=types.SimpleNamespace(InstanceObject=Instance),
             RhinoMath=types.SimpleNamespace(UnitScale=lambda _a, _b: 0.5),
             UnitSystem=types.SimpleNamespace(Inches="inches"))
-        doc = types.SimpleNamespace(ModelUnitSystem="test units", Layers=[Layer("AFUWK-INNER"), Layer("ROOT")],
+        doc = types.SimpleNamespace(ModelUnitSystem="test units", Layers=layers or [Layer("AFUWK-INNER"), Layer("ROOT")],
             Objects=types.SimpleNamespace(FindId=lambda oid: objects.get(oid)))
         modules = {"Rhino": rhino,
                    "rhinoscriptsyntax": types.SimpleNamespace(AllObjects=lambda: list(objects)),
@@ -120,11 +121,60 @@ class SceneAdapterTests(unittest.TestCase):
         self.assertEqual(part["block"], "CHILD")
         self.assertEqual(part["block_paths"], [["PARENT", "CHILD"]])
         self.assertEqual(part["occurrence_count"], 2)
+        self.assertEqual(part["sku_layers"], ["ROOT"])
+        self.assertEqual(struct["sku_layers"][0]["name"], "ROOT")
         self.assertEqual(part["bbox"], {"min": [5, 1.5, 0], "max": [12, 2.5, 0]})
         preview = scene.geometry()["parts"][0]
+        self.assertEqual(preview["sku_layer"], "ROOT")
         self.assertEqual(preview["positions"][:3], [5, 1.5, 0])
         self.assertEqual(preview["positions"][9:12], [10, 1.5, 0])
         self.assertEqual(preview["triangles"], [0, 1, 2, 3, 4, 5])
+
+    def test_nested_layers_keep_exact_instance_and_definition_layer_identity(self):
+        layers = [Layer("SKU-A::Panels"), Layer("SKU-B::Panels")]
+        objects = {
+            "a": Obj("a", Mesh([(0, 0, 0), (2, 0, 0), (0, 2, 0)], 99), layer=0),
+            "b": Obj("b", Mesh([(0, 0, 0), (2, 0, 0), (0, 2, 0)], 99), layer=1),
+        }
+        scene = self.load_adapter(objects, layers=layers).scan_document()
+        structure = scene.structure("sku.3dm")
+        self.assertEqual({sku["name"] for sku in structure["sku_layers"]}, {"SKU-A::Panels", "SKU-B::Panels"})
+        self.assertEqual({part["sku_layer"] for part in scene.geometry()["parts"]},
+                         {"SKU-A::Panels", "SKU-B::Panels"})
+        self.assertEqual({tuple(part["part_layers"]) for part in structure["sku_layers"]},
+                         {("SKU-A::Panels",), ("SKU-B::Panels",)})
+
+    def test_nested_block_instance_layers_are_preserved_independently(self):
+        layers = [Layer("Definition::Panels"), Layer("ROOT"),
+                  Layer("SKU Group::SKU-A"), Layer("SKU Group::SKU-B")]
+        definition = Definition("CABINET", [Obj("panel", Mesh([(0, 0, 0), (2, 0, 0), (0, 2, 0)], 81), layer=0)])
+        assembly = Definition("ASSEMBLY", [
+            Instance("nested-a", definition, Transform(x=10), layer=2),
+            Instance("nested-b", definition, Transform(x=20), layer=3),
+        ])
+        root = Instance("root", assembly, Transform(), layer=1)
+        scene = self.load_adapter({"root": root}, layers=layers).scan_document()
+        previews = scene.geometry()["parts"]
+        self.assertEqual({tuple(part["instance_layers"]) for part in previews}, {
+            ("ROOT", "SKU Group::SKU-A"), ("ROOT", "SKU Group::SKU-B")})
+        self.assertEqual({part["layer"] for part in previews}, {"Definition::Panels"})
+        self.assertEqual({sku["name"] for sku in scene.structure("nested.3dm")["sku_layers"]}, {
+            "ROOT", "SKU Group::SKU-A", "SKU Group::SKU-B"})
+
+    def test_block_instance_layer_is_separate_from_definition_geometry_layer(self):
+        layers = [Layer("Definition::Panels"), Layer("Default"),
+                  Layer("SKU Group::SKU-A"), Layer("SKU Group::SKU-B")]
+        definition = Definition("CABINET", [Obj("panel", Mesh([(0, 0, 0), (2, 0, 0), (0, 2, 0)], 81), layer=0)])
+        objects = {
+            "a": Instance("a", definition, Transform(x=10), layer=2),
+            "b": Instance("b", definition, Transform(x=20), layer=3),
+        }
+        scene = self.load_adapter(objects, layers=layers).scan_document()
+        geometry = scene.geometry()["parts"]
+        self.assertEqual({part["sku_layer"] for part in geometry},
+                         {"SKU Group::SKU-A", "SKU Group::SKU-B"})
+        self.assertEqual({part["layer"] for part in geometry}, {"Definition::Panels"})
+        self.assertEqual(len({part["id"] for part in geometry}), 1)
 
     def test_scaled_instance_is_reported_for_safe_planning(self):
         inner = Obj("one", Mesh([(0, 0, 0), (1, 0, 0), (0, 1, 0)], 18))

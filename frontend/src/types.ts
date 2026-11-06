@@ -30,6 +30,7 @@ export interface Part {
   block_paths?: string[][];
   occurrence_count?: number;
   matching_objects?: number;
+  sku_layers?: string[];
   renderable?: boolean;
 }
 
@@ -65,6 +66,7 @@ export interface SkuLayerInfo {
   object_count: number;
   blocks: string[];
   part_layers: string[];
+  geometry_partial?: boolean;
 }
 
 export interface Structure {
@@ -73,7 +75,17 @@ export interface Structure {
   analyzer?: string;
   target_schema?: string;
   geometry_url?: string;
+  geometry_api_url?: string;
   geometry_status?: "complete" | "partial";
+  preview_schema?: number;
+  layer_visibility_schema?: string;
+  preview_layer_geometry?: Array<{
+    layer: string;
+    member_prefix: string;
+    member_count: number;
+    geometry_partial: boolean;
+  }>;
+  geometry_layers_url?: string;
   geometry_warnings?: string[];
   named_views?: string[];
   sku_layers?: SkuLayerInfo[];
@@ -104,6 +116,9 @@ export interface Assignment {
   target_name: string;
   finish_id: number;
   scale_multiplier: number;
+  rotation_deg?: number;
+  offset_u_in?: number;
+  offset_v_in?: number;
   finish: Finish | null;
 }
 
@@ -160,6 +175,9 @@ export interface PresetRule {
   target_kind: "layer" | "block" | "part";
   target_property?: "name" | "identity";
   scale_multiplier?: number;
+  rotation_deg?: number;
+  offset_u_in?: number;
+  offset_v_in?: number;
   finish_name?: string;
   finish_thumb?: string;
 }

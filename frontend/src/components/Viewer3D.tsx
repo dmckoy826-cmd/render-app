@@ -6,21 +6,52 @@ import type { BBox, CameraPose, SavedCameraView } from "../types";
 export interface ViewerItem {
   id: string;
   name: string;
+  layer: string;
+  skuLayers: string[];
   bbox: BBox;
-  finish: { url: string; sw_w: number; sw_h: number; scale: number; metallic: boolean } | null;
+  finish: {
+    url: string;
+    sw_w: number;
+    sw_h: number;
+    scale: number;
+    rotation_deg?: number;
+    offset_u_in?: number;
+    offset_v_in?: number;
+    metallic: boolean;
+  } | null;
   color: string;
   rbe: boolean;
   conflict?: boolean;
 }
-interface PreviewPart { id: string; positions: number[]; triangles: number[]; lines: number[] }
-interface PreviewGeometry { version: number; units: string; parts: PreviewPart[] }
+interface PreviewPart {
+  id: string;
+  sku_layer?: string;
+  instance_layers?: string[];
+  layer?: string;
+  bbox?: BBox;
+  positions: number[];
+  triangles: number[];
+  lines: number[];
+}
+interface PreviewGeometry {
+  version: number;
+  units: string;
+  parts: PreviewPart[];
+  preview_mode?: "single-sku";
+  preview_partial?: boolean;
+}
+interface LayerTreeNode { path: string; label: string; children: LayerTreeNode[] }
 interface Props {
   items: ViewerItem[];
   selected: Set<string>;
   onSelect: (id: string | null) => void;
   geometryUrl?: string;
+  geometryApiUrl?: string;
   partial?: boolean;
   simulatedGeometry?: boolean;
+  skuLayerNames?: string[];
+  detailedPreviewLayers?: Array<{ layer: string; geometry_partial: boolean }>;
+  skuGeometryReady?: boolean;
   onCameraChange?: (pose: CameraPose) => void;
   savedViews?: SavedCameraView[];
   onSaveView?: (name: string, pose: CameraPose) => void;
@@ -38,6 +69,14 @@ function getTexture(url: string, loader: THREE.TextureLoader) {
     texCache.set(url, texture);
   }
   return texture;
+}
+
+function layerPrefixes(fullPath: string): string[] {
+  let prefix = "";
+  return fullPath.split("::").filter(Boolean).map((segment) => {
+    prefix = prefix ? `${prefix}::${segment}` : segment;
+    return prefix;
+  });
 }
 
 function positionsInThree(points: number[], origin: number[]): number[] {
@@ -59,6 +98,11 @@ function meshGeometry(part: PreviewPart, finish: ViewerItem["finish"], origin: n
   const uv: number[] = [];
   const sw = Math.max(finish.sw_w * finish.scale, 0.00001);
   const sh = Math.max(finish.sw_h * finish.scale, 0.00001);
+  const rad = -((finish.rotation_deg || 0) * Math.PI) / 180;
+  const cosR = Math.cos(rad);
+  const sinR = Math.sin(rad);
+  const offU = finish.offset_u_in || 0;
+  const offV = finish.offset_v_in || 0;
   for (let i = 0; i < part.triangles.length; i += 3) {
     const vertices = part.triangles.slice(i, i + 3).map((n) =>
       new THREE.Vector3(part.positions[n * 3], part.positions[n * 3 + 1], part.positions[n * 3 + 2]));
@@ -67,9 +111,20 @@ function meshGeometry(part: PreviewPart, finish: ViewerItem["finish"], origin: n
       new THREE.Vector3().subVectors(vertices[2], vertices[0]));
     const nx = Math.abs(normal.x), ny = Math.abs(normal.y), nz = Math.abs(normal.z);
     for (const p of vertices) {
-      if (nz >= nx && nz >= ny) uv.push(p.x / sw, p.y / sh);
-      else if (nx >= ny) uv.push(p.y / sw, p.z / sh);
-      else uv.push(p.x / sw, p.z / sh);
+      let s0 = p.x;
+      let t0 = p.z;
+      if (nz >= nx && nz >= ny) {
+        s0 = p.x;
+        t0 = p.y;
+      } else if (nx >= ny) {
+        s0 = p.y;
+        t0 = p.z;
+      }
+      const sShift = s0 - offU;
+      const tShift = t0 - offV;
+      const sRot = sShift * cosR - tShift * sinR;
+      const tRot = sShift * sinR + tShift * cosR;
+      uv.push(sRot / sw, tRot / sh);
     }
   }
   geo.setAttribute("uv", new THREE.Float32BufferAttribute(uv, 2));
@@ -78,7 +133,8 @@ function meshGeometry(part: PreviewPart, finish: ViewerItem["finish"], origin: n
 
 /** Rhino model space (x, y, z-up inches) -> Three.js (x, z, -y). */
 export default function Viewer3D({
-  items, selected, onSelect, geometryUrl, partial, simulatedGeometry,
+  items, selected, onSelect, geometryUrl, geometryApiUrl, partial, simulatedGeometry,
+  skuLayerNames = [], detailedPreviewLayers = [], skuGeometryReady = false,
   onCameraChange, savedViews = [], onSaveView, onDeleteView,
 }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
@@ -91,6 +147,50 @@ export default function Viewer3D({
   const [status, setStatus] = useState<"box" | "loading" | "mesh" | "error">("box");
   const [newViewName, setNewViewName] = useState("");
   const [savingView, setSavingView] = useState(false);
+  const [layerMenuOpen, setLayerMenuOpen] = useState(false);
+  const [focusedPreviewLayer, setFocusedPreviewLayer] = useState<string | null>(null);
+  // Visibility is stored per Rhino-like layer node. A hidden SKU root masks its
+  // children without changing their individual on/off state, just like Rhino.
+  const [hiddenPreviewLayers, setHiddenPreviewLayers] = useState<Record<string, true>>({});
+  const layerNames = [...new Set([
+    ...skuLayerNames,
+    ...items.map((item) => item.layer),
+    ...items.flatMap((item) => item.skuLayers),
+  ])].sort((a, b) => a.localeCompare(b));
+  const allLayerPaths = [...new Set(layerNames.flatMap(layerPrefixes))].sort((a, b) => a.localeCompare(b));
+  const layerTree: LayerTreeNode[] = [];
+  for (const fullPath of allLayerPaths) {
+    let branch = layerTree;
+    for (const path of layerPrefixes(fullPath)) {
+      let node = branch.find((candidate) => candidate.path === path);
+      if (!node) {
+        node = { path, label: path.split("::").pop() || path, children: [] };
+        branch.push(node);
+      }
+      branch = node.children;
+    }
+  }
+  const sortChildren = (nodes: LayerTreeNode[]) => {
+    nodes.sort((a, b) => a.label.localeCompare(b.label));
+    nodes.forEach((node) => sortChildren(node.children));
+  };
+  sortChildren(layerTree);
+  const isLayerVisible = (path: string) =>
+    layerPrefixes(path).every((parent) => !hiddenPreviewLayers[parent]);
+  const activeScopes = [...new Set(items.flatMap((item) => {
+    const instanceLayers = item.skuLayers.length ? item.skuLayers : [item.layer];
+    if (!isLayerVisible(item.layer)) return [];
+    return instanceLayers.filter(isLayerVisible).map((instanceLayer) =>
+      JSON.stringify([instanceLayer, item.layer])
+    );
+  }))].sort();
+  const activeScopeKey = activeScopes.join("|");
+  const hiddenLayerKey = Object.keys(hiddenPreviewLayers).sort().join("|");
+  const shownItems = items.filter((item) => {
+    const instanceLayers = item.skuLayers.length ? item.skuLayers : [item.layer];
+    return isLayerVisible(item.layer) && instanceLayers.some(isLayerVisible);
+  });
+  const noVisibleSelection = activeScopes.length === 0;
   const selectedKey = [...selected].sort().join("|");
   const onSelectRef = useRef(onSelect);
   onSelectRef.current = onSelect;
@@ -157,17 +257,36 @@ export default function Viewer3D({
   };
 
   useEffect(() => {
-    if (!geometryUrl) { setGeometry(null); setStatus("box"); return; }
+    const canFilterOnServer = !!(skuGeometryReady && geometryApiUrl);
+    const sourceUrl = canFilterOnServer ? geometryApiUrl : geometryUrl;
+    if (!sourceUrl) { setGeometry(null); setStatus("box"); return; }
+    if (noVisibleSelection) {
+      setGeometry({ version: 1, units: "inches", parts: [] });
+      setStatus("mesh");
+      return;
+    }
+    const params = new URLSearchParams();
+    if (canFilterOnServer) {
+      Object.keys(hiddenPreviewLayers).forEach((path) => params.append("hidden_layer", path));
+      if (focusedPreviewLayer && detailedPreviewLayers.some((entry) => entry.layer === focusedPreviewLayer)
+          && isLayerVisible(focusedPreviewLayer)) {
+        params.set("preview_sku_layer", focusedPreviewLayer);
+      }
+    }
+    const url = params.size ? `${sourceUrl}?${params.toString()}` : sourceUrl;
     const controller = new AbortController();
-    setGeometry(null); setStatus("loading");
-    fetch(geometryUrl, { signal: controller.signal }).then(async (response) => {
+    // Keep the last loaded mesh visible while the filtered payload is fetched.
+    // The render effect applies current layer visibility locally immediately, so
+    // hidden chunks disappear at once without flashing the whole canvas empty.
+    setStatus("loading");
+    fetch(url, { signal: controller.signal }).then(async (response) => {
       if (!response.ok) throw new Error("geometry unavailable");
       const data: PreviewGeometry = await response.json();
       if (data.version !== 1 || data.units !== "inches" || !Array.isArray(data.parts)) throw new Error("bad geometry");
       setGeometry(data); setStatus("mesh");
     }).catch((err) => { if (err.name !== "AbortError") setStatus("error"); });
     return () => controller.abort();
-  }, [geometryUrl]);
+  }, [geometryUrl, geometryApiUrl, skuGeometryReady, activeScopeKey, hiddenLayerKey, focusedPreviewLayer]);
 
   useEffect(() => {
     const host = hostRef.current!;
@@ -244,40 +363,79 @@ export default function Viewer3D({
       const material = obj.material as THREE.Material | THREE.Material[] | undefined;
       if (Array.isArray(material)) material.forEach((m) => m.dispose()); else material?.dispose();
     }
-    if (!items.length) return;
+    if (!shownItems.length) return;
+    const geometryById = new Map<string, PreviewPart[]>();
+    for (const part of geometry?.parts || []) {
+      const list = geometryById.get(part.id) || [];
+      list.push(part);
+      geometryById.set(part.id, list);
+    }
+    const partsForItem = (item: ViewerItem) => (geometryById.get(item.id) || []).filter((part) => {
+      const partLayer = part.layer || item.layer;
+      const instanceLayers = Array.isArray(part.instance_layers)
+        ? part.instance_layers
+        : part.sku_layer ? [part.sku_layer] : [];
+      if (focusedPreviewLayer && !instanceLayers.includes(focusedPreviewLayer)
+          && part.sku_layer !== focusedPreviewLayer) return false;
+      if (instanceLayers.length) {
+        return instanceLayers.every(isLayerVisible) && isLayerVisible(partLayer);
+      }
+      if (!skuGeometryReady) {
+        // Legacy payloads merged repeated block occurrences. Show their mesh only
+        // when every owning instance layer is on; never leak hidden block geometry.
+        const instanceLayers = item.skuLayers.length ? item.skuLayers : [item.layer];
+        return instanceLayers.every(isLayerVisible) && isLayerVisible(partLayer);
+      }
+      return item.skuLayers.length === 0 && isLayerVisible(partLayer);
+    });
+    const activeItems = noVisibleSelection ? [] : shownItems.filter((item) =>
+      geometry === null || partsForItem(item).length > 0
+    );
+    if (!activeItems.length) return;
     const min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
-    for (const item of items) for (let i = 0; i < 3; i++) {
-      min[i] = Math.min(min[i], item.bbox.min[i]); max[i] = Math.max(max[i], item.bbox.max[i]);
+    for (const item of activeItems) {
+      const matchedParts = partsForItem(item);
+      const bounds = matchedParts.map((part) => part.bbox).filter((box): box is BBox => !!box);
+      if (bounds.length) {
+        for (const box of bounds) for (let i = 0; i < 3; i++) {
+          min[i] = Math.min(min[i], box.min[i]); max[i] = Math.max(max[i], box.max[i]);
+        }
+      } else {
+        for (let i = 0; i < 3; i++) {
+          min[i] = Math.min(min[i], item.bbox.min[i]); max[i] = Math.max(max[i], item.bbox.max[i]);
+        }
+      }
     }
     // Recenter before converting to float32 so large CAD coordinates retain detail.
     const origin = min.map((v, i) => (v + max[i]) / 2) as [number, number, number];
     const radius = Math.hypot(max[0] - min[0], max[1] - min[1], max[2] - min[2]) / 2 || 50;
     st.origin = origin;
     st.radius = radius;
-    const geometryById = new Map((geometry?.parts || []).map((part) => [part.id, part]));
-    const showBoxes = !geometry;
-    for (const item of items) {
-      const part = geometryById.get(item.id);
+    const showBoxes = !geometry && Object.keys(hiddenPreviewLayers).length === 0;
+    for (const item of activeItems) {
+      const previewParts = partsForItem(item);
       const isSelected = selected.has(item.id);
-      if (part && part.positions.length && part.triangles.length) {
-        const geo = meshGeometry(part, item.finish, origin);
-        const mat = new THREE.MeshStandardMaterial({
-          color: item.finish ? 0xffffff : new THREE.Color(item.color),
-          map: item.finish ? getTexture(item.finish.url, loader) : null,
-          roughness: item.finish?.metallic ? 0.35 : 0.8,
-          metalness: item.finish?.metallic ? 0.6 : 0.02,
-          emissive: isSelected ? 0x704600 : item.rbe ? 0x052027 : 0x000000,
-          side: THREE.DoubleSide,
-        });
-        const mesh = new THREE.Mesh(geo, mat);
-        mesh.userData.partId = item.id; group.add(mesh);
-      }
-      if (part && part.positions.length && part.lines.length) {
-        const geo = new THREE.BufferGeometry();
-        geo.setAttribute("position", new THREE.Float32BufferAttribute(positionsInThree(part.positions, origin), 3));
-        geo.setIndex(part.lines);
-        const lines = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: isSelected ? 0xf59e0b : item.color }));
-        lines.userData.partId = item.id; group.add(lines);
+      for (const part of previewParts) {
+        if (part.positions.length && part.triangles.length) {
+          const geo = meshGeometry(part, item.finish, origin);
+          const mat = new THREE.MeshStandardMaterial({
+            color: item.finish ? 0xffffff : new THREE.Color(item.color),
+            map: item.finish ? getTexture(item.finish.url, loader) : null,
+            roughness: item.finish?.metallic ? 0.35 : 0.8,
+            metalness: item.finish?.metallic ? 0.6 : 0.02,
+            emissive: isSelected ? 0x704600 : item.rbe ? 0x052027 : 0x000000,
+            side: THREE.DoubleSide,
+          });
+          const mesh = new THREE.Mesh(geo, mat);
+          mesh.userData.partId = item.id; group.add(mesh);
+        }
+        if (part.positions.length && part.lines.length) {
+          const geo = new THREE.BufferGeometry();
+          geo.setAttribute("position", new THREE.Float32BufferAttribute(positionsInThree(part.positions, origin), 3));
+          geo.setIndex(part.lines);
+          const lines = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: isSelected ? 0xf59e0b : item.color }));
+          lines.userData.partId = item.id; group.add(lines);
+        }
       }
       if (showBoxes) {
         const [x0, y0, z0] = item.bbox.min, [x1, y1, z1] = item.bbox.max;
@@ -304,7 +462,7 @@ export default function Viewer3D({
         edges.position.copy(box.position); group.add(edges);
       }
     }
-    const frameKey = `${geometryUrl || "boxes"}:${min.join(",")}:${max.join(",")}:${items.map((i) => i.id).join("|")}`;
+    const frameKey = `${geometryUrl || "boxes"}:${min.join(",")}:${max.join(",")}:${activeItems.map((i) => i.id).join("|")}:${activeScopeKey}`;
     if (st.framed !== frameKey) {
       camera.position.set(radius * 1.5, radius * 1.05, -radius * 1.5);
       camera.near = Math.max(radius / 10000, 0.001); camera.far = Math.max(radius * 100, 10000);
@@ -312,12 +470,55 @@ export default function Viewer3D({
       st.framed = frameKey;
       emitCameraPose();
     }
-  }, [items, geometry, geometryUrl, selectedKey]);
+  }, [items, geometry, geometryUrl, selectedKey, activeScopeKey, hiddenLayerKey, skuGeometryReady, focusedPreviewLayer]);
 
-  const label = status === "loading" ? "Loading Rhino geometry… (boxes shown temporarily)"
+  const label = noVisibleSelection || shownItems.length === 0 ? "No preview geometry visible — turn on a SKU or part layer"
+    : hiddenLayerKey && !skuGeometryReady ? "Re-analyze this model to isolate geometry by SKU layer"
+    : status === "loading" ? (geometry ? "Updating Rhino preview…" : "Loading Rhino geometry… (boxes shown temporarily)")
     : status === "error" ? "Geometry could not be loaded — bounding-box fallback"
-    : status === "mesh" ? (simulatedGeometry ? "Synthetic test geometry — not Rhino" : partial ? "Partial Rhino tessellation — some objects omitted" : "Rhino tessellated geometry · finish preview is approximate")
+    : status === "mesh" ? (simulatedGeometry ? "Synthetic test geometry — not Rhino"
+      : geometry?.preview_mode === "single-sku"
+        ? (geometry.preview_partial ? "Single-SKU preview reached its per-layer limit" : "Full-budget single-SKU preview · approximate tessellation")
+        : partial ? "All-layers preview is partial — use Full on one SKU layer" : "Rhino tessellated geometry · finish preview is approximate")
     : "Bounding-box fallback — not actual CAD geometry";
+  const renderLayerNode = (node: LayerTreeNode, depth: number): any => {
+    const key = node.path;
+    const color = items.find((item) => item.layer === node.path || item.skuLayers.includes(node.path))?.color || "#71717a";
+    const inheritedOff = layerPrefixes(node.path).slice(0, -1).some((parent) => !!hiddenPreviewLayers[parent]);
+    const isInstanceLayer = skuLayerNames.includes(node.path);
+    const isDefinitionLayer = items.some((item) => item.layer === node.path);
+    const role = isInstanceLayer && isDefinitionLayer ? "Instance + geometry"
+      : isInstanceLayer ? "Block instance" : isDefinitionLayer ? "Geometry layer" : "Parent layer";
+    const detailInfo = detailedPreviewLayers.find((entry) => entry.layer === key);
+    const focused = focusedPreviewLayer === key;
+    return <div key={key}>
+      <div className="flex items-center gap-1" style={{ paddingLeft: `${depth * 13 + 6}px` }}>
+        <label className={`flex min-w-0 flex-1 items-center gap-2 rounded px-1.5 py-1 ${inheritedOff ? "cursor-not-allowed text-zinc-600" : "cursor-pointer text-zinc-300 hover:bg-zinc-900"}`}
+          title={inheritedOff ? `${node.path} is controlled by a hidden parent` : node.path}>
+          <input type="checkbox" checked={!hiddenPreviewLayers[key]} disabled={inheritedOff}
+            onChange={() => setHiddenPreviewLayers((current) => {
+              const next = { ...current };
+              if (next[key]) delete next[key]; else next[key] = true;
+              return next;
+            })} className="accent-amber-500" />
+          <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: color }} />
+          <span className="min-w-0 flex-1 truncate">{node.label}</span>
+          <span className="shrink-0 text-[9px] text-zinc-600">{role}</span>
+        </label>
+        {detailInfo && <button type="button" disabled={!isLayerVisible(key)}
+          onClick={() => setFocusedPreviewLayer(focused ? null : key)}
+          className={`shrink-0 rounded px-1.5 py-1 text-[9px] ${focused ? "bg-amber-500 text-zinc-950" : "text-amber-300 hover:bg-zinc-800"} disabled:cursor-not-allowed disabled:opacity-30`}
+          title={detailInfo.geometry_partial ? "Use this layer's separate preview budget (some geometry may still be omitted)" : "Show this SKU layer using its own preview budget"}>
+          {focused ? "Full ✓" : "Full"}
+        </button>}
+      </div>
+      {node.children.map((child) => renderLayerNode(child, depth + 1))}
+    </div>;
+  };
+  const allScopeCount = new Set(items.flatMap((item) => {
+    const instanceLayers = item.skuLayers.length ? item.skuLayers : [item.layer];
+    return instanceLayers.map((instanceLayer) => JSON.stringify([instanceLayer, item.layer]));
+  })).size;
   return <div className="relative h-full w-full overflow-hidden"><div ref={hostRef} className="absolute inset-0 overflow-hidden" />
     <div className=" absolute right-4 top-4 z-10 flex flex-col items-end gap-1.5">
       <div className="flex flex-wrap items-center gap-1 rounded-lg border border-zinc-800/90 bg-zinc-950/85 p-1 text-[11px] backdrop-blur">
@@ -328,6 +529,11 @@ export default function Viewer3D({
             {p}
           </button>
         ))}
+        <button onClick={() => setLayerMenuOpen((open) => !open)}
+          className={`ml-1 rounded border px-2 py-1 ${hiddenLayerKey ? "border-amber-500/50 text-amber-300" : "border-zinc-700 text-zinc-300"} hover:bg-zinc-800`}
+          title="Rhino-style hierarchical layer visibility">
+          Rhino Layers {activeScopes.length}/{allScopeCount}
+        </button>
         {onSaveView && (
           <button onClick={() => setSavingView((v) => !v)}
             className="ml-1 rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-amber-300 hover:bg-amber-500/20">
@@ -335,6 +541,23 @@ export default function Viewer3D({
           </button>
         )}
       </div>
+      {layerMenuOpen && (
+        <div className="w-72 rounded-lg border border-zinc-800 bg-zinc-950/95 p-2 text-xs shadow-xl backdrop-blur">
+          <div className="mb-2 flex items-center justify-between border-b border-zinc-800 pb-2">
+            <span className="font-medium text-zinc-200">Rhino layer visibility</span>
+            <div className="flex gap-1">
+              <button onClick={() => setHiddenPreviewLayers({})} className="rounded px-1.5 py-1 text-amber-300 hover:bg-zinc-800">All on</button>
+              <button onClick={() => setHiddenPreviewLayers(Object.fromEntries(allLayerPaths.map((key) => [key, true])) as Record<string, true>)} className="rounded px-1.5 py-1 text-zinc-400 hover:bg-zinc-800">All off</button>
+            </div>
+          </div>
+          <p className="mb-1 px-1.5 text-[10px] text-zinc-500">Turning off a parent hides descendants. Click “Full” beside one instance layer to load its meshes with a separate budget; other SKUs stay unloaded.</p>
+          {focusedPreviewLayer && <p className="mb-1 truncate px-1.5 text-[10px] text-amber-300">Full preview: {focusedPreviewLayer}</p>}
+          <div className="max-h-72 space-y-0.5 overflow-y-auto">
+            {layerTree.map((node) => renderLayerNode(node, 0))}
+            {!layerTree.length && <p className="px-1.5 py-2 text-zinc-500">No preview layers available.</p>}
+          </div>
+        </div>
+      )}
       {savingView && onSaveView && (
         <div className="flex items-center gap-1.5 rounded-lg border border-zinc-700 bg-zinc-950/95 p-1.5 text-xs shadow-lg">
           <input value={newViewName} onChange={(e) => setNewViewName(e.target.value)}

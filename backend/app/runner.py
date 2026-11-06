@@ -211,6 +211,8 @@ def apply_analysis(db: Session, model: ModelDoc, structure: dict,
     """
     old_geometry = (model.structure or {}).get("geometry_url", "")
     new_geometry = structure.get("geometry_url", "")
+    old_geometry_layers = (model.structure or {}).get("geometry_layers_url", "")
+    new_geometry_layers = structure.get("geometry_layers_url", "")
     model.structure = structure
     model.units = structure.get("units", "inches")
     if preview_rel is None:
@@ -234,6 +236,12 @@ def apply_analysis(db: Session, model: ModelDoc, structure: dict,
     if old_file is not None and old_geometry != new_geometry:
         try:
             old_file.unlink(missing_ok=True)
+        except OSError:
+            pass
+    old_layers_file = config.geometry_archive_from_url(old_geometry_layers)
+    if old_layers_file is not None and old_geometry_layers != new_geometry_layers:
+        try:
+            old_layers_file.unlink(missing_ok=True)
         except OSError:
             pass
 
@@ -295,8 +303,15 @@ def agent_assignment_snapshot(db: Session, model_id: int) -> list[dict]:
         finish = db.get(Finish, row.finish_id)
         payload = None if finish is None else {**finish_out(finish),
                                                 "file_url": f"/media/{finish.storage_path}"}
-        assignments.append({"target_kind": row.target_kind, "target_name": row.target_name,
-                            "scale_multiplier": row.scale_multiplier, "finish": payload})
+        assignments.append({
+            "target_kind": row.target_kind,
+            "target_name": row.target_name,
+            "scale_multiplier": row.scale_multiplier,
+            "rotation_deg": getattr(row, "rotation_deg", 0.0) or 0.0,
+            "offset_u_in": getattr(row, "offset_u_in", 0.0) or 0.0,
+            "offset_v_in": getattr(row, "offset_v_in", 0.0) or 0.0,
+            "finish": payload,
+        })
     return assignments
 
 def snapshot_from_agent_assignments(assignments: list[dict]) -> list[dict]:
@@ -386,7 +401,9 @@ def auto_assign_from_names(db: Session, model: ModelDoc, threshold: float = 0.45
 
 
 def upsert_assignment(db: Session, model_id: int, kind: str, name: str,
-                      finish_id: int, scale_multiplier: float = 1.0) -> Assignment:
+                      finish_id: int, scale_multiplier: float = 1.0,
+                      rotation_deg: float = 0.0, offset_u_in: float = 0.0,
+                      offset_v_in: float = 0.0) -> Assignment:
     a = db.query(Assignment).filter(
         Assignment.model_id == model_id,
         Assignment.target_kind == kind,
@@ -394,10 +411,15 @@ def upsert_assignment(db: Session, model_id: int, kind: str, name: str,
     if a:
         a.finish_id = finish_id
         a.scale_multiplier = scale_multiplier
+        a.rotation_deg = rotation_deg
+        a.offset_u_in = offset_u_in
+        a.offset_v_in = offset_v_in
         a.updated_at = utcnow()
     else:
         a = Assignment(model_id=model_id, target_kind=kind, target_name=name,
-                       finish_id=finish_id, scale_multiplier=scale_multiplier)
+                       finish_id=finish_id, scale_multiplier=scale_multiplier,
+                       rotation_deg=rotation_deg, offset_u_in=offset_u_in,
+                       offset_v_in=offset_v_in)
         db.add(a)
     db.commit()
     db.refresh(a)
