@@ -139,7 +139,18 @@ def preview_geometry(geometry, kind, factor):
     else:
         brep = geometry if kind == "brep" else geometry.ToBrep()
         if brep is not None:
-            meshes = Rhino.Geometry.Mesh.CreateFromBrep(brep, Rhino.Geometry.MeshingParameters.Default) or []
+            # This is an interactive preview, not the production render mesh.
+            # Rhino's default mesher can exhaust the per-SKU preview budget on
+            # detailed CAD; FastRenderMesh keeps the silhouette usable while
+            # reserving the final material/render geometry for the render worker.
+            parameters_type = getattr(Rhino.Geometry, "MeshingParameters", None)
+            parameters = getattr(parameters_type, "FastRenderMesh", None) if parameters_type else None
+            if parameters is None and parameters_type is not None:
+                parameters = getattr(parameters_type, "Default", None)
+            if parameters is None:
+                meshes = Rhino.Geometry.Mesh.CreateFromBrep(brep) or []
+            else:
+                meshes = Rhino.Geometry.Mesh.CreateFromBrep(brep, parameters) or []
     for mesh in meshes:
         start = len(positions) // 3
         for vertex in mesh.Vertices:

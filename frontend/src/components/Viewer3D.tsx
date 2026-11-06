@@ -263,7 +263,10 @@ export default function Viewer3D({
     }
     const url = params.size ? `${sourceUrl}?${params.toString()}` : sourceUrl;
     const controller = new AbortController();
-    setGeometry(null); setStatus("loading");
+    // Keep the last loaded mesh visible while the filtered payload is fetched.
+    // The render effect applies current layer visibility locally immediately, so
+    // hidden chunks disappear at once without flashing the whole canvas empty.
+    setStatus("loading");
     fetch(url, { signal: controller.signal }).then(async (response) => {
       if (!response.ok) throw new Error("geometry unavailable");
       const data: PreviewGeometry = await response.json();
@@ -457,7 +460,7 @@ export default function Viewer3D({
 
   const label = noVisibleSelection || shownItems.length === 0 ? "No preview geometry visible — turn on a SKU or part layer"
     : hiddenLayerKey && !skuGeometryReady ? "Re-analyze this model to isolate geometry by SKU layer"
-    : status === "loading" ? "Loading Rhino geometry… (boxes shown temporarily)"
+    : status === "loading" ? (geometry ? "Updating Rhino preview…" : "Loading Rhino geometry… (boxes shown temporarily)")
     : status === "error" ? "Geometry could not be loaded — bounding-box fallback"
     : status === "mesh" ? (simulatedGeometry ? "Synthetic test geometry — not Rhino" : partial ? "Stored Rhino tessellation is partial — see analysis warning" : "Rhino tessellated geometry · finish preview is approximate")
     : "Bounding-box fallback — not actual CAD geometry";
