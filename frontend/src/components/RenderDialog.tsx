@@ -467,7 +467,13 @@ export default function RenderDialog({
       wide={mode === "batch"}
     >
       {job && active ? (
-        <JobProgress job={job} />
+        <JobProgress
+          job={job}
+          onCanceled={() => {
+            setJob(null);
+            setBusy(false);
+          }}
+        />
       ) : (
         <div className="space-y-4">
           {/* Mode selector */}
